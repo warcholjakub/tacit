@@ -29,35 +29,39 @@ private val MaxLineChars = 16 * 1024 * 1024
 
   Config.parseCliArgs(args.toArray) match
     case None => ()  // errors already displayed by the parser
-    case Some(config) => usingContext(config):
-      val server = McpServer()
-      val reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))
-      val writer = PrintWriter(jsonRpcOut, true)
+    case Some(config) => PluginLoader.loadAll(config.pluginJars, config.pluginScanDirs) match
+      case Left(err) =>
+        System.err.println(s"Error: $err")
+        sys.exit(1)
+      case Right(plugins) => usingContext(config, plugins):
+        val server = McpServer()
+        val reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))
+        val writer = PrintWriter(jsonRpcOut, true)
 
-      if !config.quiet then printStartupBanner(config)
+        if !config.quiet then printStartupBanner(config)
 
-      try
-        var running = true
-        while running do
-          readBoundedLine(reader, MaxLineChars) match
-            case None =>
-              running = false
-            case Some(Left(())) =>
-              // Over-long line: the prefix was discarded up to the newline, so
-              // the stream is positioned at the next request. The id is
-              // unknowable here — respond with `id: null` and keep serving.
-              sendResponse(writer, JsonRpcResponse.error(None, JsonRpcError.ParseError,
-                s"Parse error: request exceeds the $MaxLineChars-character line limit"))
-            case Some(Right(line)) =>
-              if line.trim.nonEmpty then
-                try handleLine(line, writer, server)
-                catch
-                  case NonFatal(e) =>
-                    // The response path itself failed (e.g. broken pipe); no
-                    // response can be sent, so just log and keep the loop alive.
-                    error(s"Failed to handle request: ${e.getMessage}")
-                    e.printStackTrace(System.err)
-      finally log("Server shutting down...")
+        try
+          var running = true
+          while running do
+            readBoundedLine(reader, MaxLineChars) match
+              case None =>
+                running = false
+              case Some(Left(())) =>
+                // Over-long line: the prefix was discarded up to the newline, so
+                // the stream is positioned at the next request. The id is
+                // unknowable here — respond with `id: null` and keep serving.
+                sendResponse(writer, JsonRpcResponse.error(None, JsonRpcError.ParseError,
+                  s"Parse error: request exceeds the $MaxLineChars-character line limit"))
+              case Some(Right(line)) =>
+                if line.trim.nonEmpty then
+                  try handleLine(line, writer, server)
+                  catch
+                    case NonFatal(e) =>
+                      // The response path itself failed (e.g. broken pipe); no
+                      // response can be sent, so just log and keep the loop alive.
+                      error(s"Failed to handle request: ${e.getMessage}")
+                      e.printStackTrace(System.err)
+        finally log("Server shutting down...")
 
 /** Read one line from `reader`, retaining at most `limit` characters.
   *

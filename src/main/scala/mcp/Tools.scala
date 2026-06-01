@@ -77,7 +77,7 @@ object Tools:
     ),
     Tool(
       name = "show_interface",
-      description = Some("Show the full capability-scoped API available in the REPL. Call this first to understand what methods you can use. You must only use the provided interface to interact with the system."),
+      description = Some("Show the currently loaded capability-scoped API. Depending on plugin API mode, this is either the core TACIT Interface (optionally extended by extend-core plugins) or a plugin-provided replacement API. Call this first to understand what methods you can use. You must only use the provided interface to interact with the system."),
       inputSchema = Json.obj(
         "type" -> "object".asJson,
         "properties" -> Json.obj(),

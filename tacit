@@ -49,6 +49,7 @@ Examples:
   tacit self uninstall
   tacit update
   tacit serve --quiet
+  tacit serve --plugin ./excel-review-plugin.jar
 EOF
 }
 

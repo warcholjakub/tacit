@@ -1,7 +1,7 @@
 package tacit
 package executor
 
-import core.Context
+import core.{ApiMode, Context}
 import Context.*
 
 import dotty.tools.repl.*
@@ -83,11 +83,18 @@ object ManagedRepl:
       finally jar.close()
     catch case _: Exception => None
 
+  /** Core library JAR plus any TACIT plugin JARs declared in config. */
+  private[executor] def replClasspathJars(using Context): List[String] =
+    ctx.config.libraryJarPath :: ctx.plugins.map(_.jarPath)
+
   /** The library fat JAR provides the full classpath (Scala stdlib + library
-    * classes + library dependencies), so we don't need `-usejavacp`.
+    * classes + library dependencies), so we don't need `-usejavacp`. TACIT
+    * plugin JARs are appended to the classpath.
     */
   private def replClasspathArgs(using Context): Array[String] =
-    val classpath = JFile(ctx.config.libraryJarPath).getAbsolutePath
+    val classpath = replClasspathJars
+      .map(JFile(_).getAbsolutePath)
+      .mkString(JFile.pathSeparator)
     Array(
       "-classpath", classpath,
       "-color:never",
@@ -108,22 +115,21 @@ object ManagedRepl:
       "-Xrepl-interrupt-instrumentation:local"
     )
 
-  /** Exposes only JDK platform classes and the library JAR, keeping user code
-    * away from server internals (tacit.core, tacit.mcp, tacit.executor) and
-    * server dependencies (circe, scopt, etc.).
+  /** Exposes only JDK platform classes and the library JARs (core + plugins),
+    * keeping user code away from server internals (tacit.core, tacit.mcp,
+    * tacit.executor) and server dependencies (circe, scopt, etc.).
     */
   private def sandboxedClassLoader(using Context): ClassLoader =
-    val libraryUrl = JFile(ctx.config.libraryJarPath).toURI.toURL
-    new URLClassLoader(
-      Array(libraryUrl),
-      ClassLoader.getPlatformClassLoader
-    )
+    val urls = replClasspathJars.map(p => JFile(p).toURI.toURL).toArray
+    new URLClassLoader(urls, ClassLoader.getPlatformClassLoader)
 
-  /** Preamble injected before any user code so the capability API is in
-    * scope. `SandboxInterface` has no constructor parameters: its policy is
-    * the config the server registered in [[ManagedRepl.configureLibrary]].
+  /** Core tacit-library preamble: imports the tacit Interface and exposes
+    * `api.*`. Used when no plugin is loaded, or when every loaded plugin
+    * declares `apiMode: extend-core`. `SandboxInterface` has no constructor
+    * parameters: its policy is the config the server registered in
+    * [[ManagedRepl.configureLibrary]].
     */
-  private[executor] val libraryPreamble: String =
+  private val corePreamble: String =
     """|import tacit.library.*
        |import caps.*
        |@assumeSafe object api extends SandboxInterface
@@ -145,6 +151,28 @@ object ManagedRepl:
     try module.getMethod("configure", classOf[String]).invoke(instance, libraryConfigJson)
     catch case e: java.lang.reflect.InvocationTargetException =>
       throw Option(e.getCause).getOrElse(e)
+
+  /** Preamble injected before any user code so the capability API is in scope.
+    *
+    *  - No plugins → core preamble only.
+    *  - All plugins `extend-core` → core preamble followed by each plugin's
+    *    preamble in declaration order.
+    *  - All plugins `replace-core` → only plugin preambles, no core. This
+    *    matters because plugin libraries (e.g. `safemode.lib`) may define
+    *    `Classified[T]`/`FileSystem`/`IOCapability` shapes that would collide
+    *    with tacit-library's if both preambles ran.
+    *
+    * Mixed `extend-core` + `replace-core` is impossible at this point because
+    * `PluginLoader.loadAll` rejects it at startup.
+    */
+  private[tacit] def libraryPreamble(using Context): String =
+    val plugins = ctx.plugins
+    if plugins.isEmpty then corePreamble
+    else
+      val includeCore = plugins.forall(_.manifest.apiMode == ApiMode.ExtendCore)
+      val parts =
+        Option.when(includeCore)(corePreamble).toList ++ plugins.map(_.preamble)
+      parts.mkString("\n")
 
   /** We swap `System.out`/`System.err` around each execution to catch output the
    *  REPL driver doesn't route through `printStream` (notably compiler

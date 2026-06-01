@@ -16,6 +16,16 @@ case class Config(
   executionTimeoutMs: Option[Long] = None,
   libraryJarPath: String = Option(System.getProperty("tacit.library.jar")).getOrElse(""),
   libraryConfig: Json = Json.obj(),
+  /** TACIT plugin JARs loaded into the REPL classpath at startup.
+   *  Each must contain a top-level `tacit-plugin.json` manifest, along
+   *  with the preamble and API-docs resources it declares.
+   */
+  pluginJars: List[String] = Nil,
+  /** Folders scanned at startup for `*.jar` plugin files (non-recursive,
+   *  alphabetical by file name). Each discovered JAR must satisfy the same
+   *  manifest contract as `pluginJars`.
+   */
+  pluginScanDirs: List[String] = Nil,
 ):
   def withLibrary(key: String, value: Json): Config =
     copy(libraryConfig = libraryConfig.deepMerge(Json.obj(key -> value)))
@@ -44,6 +54,8 @@ private case class FileConfig(
   executionTimeoutMs: Option[Long] = None,
   libraryJarPath: Option[String] = None,
   libraryConfig: Option[Json] = None,
+  pluginJars: Option[List[String]] = None,
+  pluginScanDirs: Option[List[String]] = None,
 ) derives Decoder
 
 object Config:
@@ -74,6 +86,10 @@ object Config:
       executionTimeoutMs = fc.executionTimeoutMs.orElse(base.executionTimeoutMs),
       libraryJarPath = fc.libraryJarPath.getOrElse(base.libraryJarPath),
       libraryConfig = fc.libraryConfig.getOrElse(Json.obj()).deepMerge(base.libraryConfig),
+      // File-provided plugin list replaces base's (no merge); CLI flags after
+      // --config can still append because they run on the merged result.
+      pluginJars = fc.pluginJars.getOrElse(base.pluginJars),
+      pluginScanDirs = fc.pluginScanDirs.getOrElse(base.pluginScanDirs),
     )
 
   private def validateLlmConfig(config: Config): Config =
@@ -92,6 +108,23 @@ object Config:
       System.err.println("Error: --library-jar is required"); None
     else if !java.io.File(config.libraryJarPath).exists() then
       System.err.println(s"Error: Library JAR not found: '${config.libraryJarPath}'"); None
+    else Some(config)
+
+  private def validatePlugins(config: Config): Option[Config] =
+    val missingJars = config.pluginJars.filterNot(p => java.io.File(p).exists())
+    val badDirs = config.pluginScanDirs.filterNot: p =>
+      val f = java.io.File(p)
+      f.exists() && f.isDirectory
+    if missingJars.nonEmpty then
+      System.err.println(
+        s"Error: Plugin JAR(s) not found: ${missingJars.mkString(", ")}"
+      )
+      None
+    else if badDirs.nonEmpty then
+      System.err.println(
+        s"Error: Plugin scan dir(s) not found or not a directory: ${badDirs.mkString(", ")}"
+      )
+      None
     else Some(config)
 
   /** A non-positive timeout is never sane: 0 disables the watchdog silently
@@ -145,6 +178,14 @@ object Config:
       opt[String]("library-jar")
         .action((x, c) => c.copy(libraryJarPath = x))
         .text("Path to the library JAR (TACIT-library.jar). Required."),
+      opt[String]("plugin")
+        .unbounded()
+        .action((x, c) => c.copy(pluginJars = c.pluginJars :+ x))
+        .text("TACIT plugin JAR to load. May be repeated."),
+      opt[String]("plugin-dir")
+        .unbounded()
+        .action((x, c) => c.copy(pluginScanDirs = c.pluginScanDirs :+ x))
+        .text("Folder scanned for plugin JARs at startup. May be repeated."),
       opt[String]('c', "config")
         .action((x, c) => mergeFromFile(c, x))
         .text("Path to JSON config file."),
@@ -164,3 +205,4 @@ object Config:
       .map(validateLlmConfig)
       .flatMap(validateExecutionTimeout)
       .flatMap(validateLibraryJar)
+      .flatMap(validatePlugins)
