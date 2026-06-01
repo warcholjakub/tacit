@@ -18,29 +18,60 @@ private object BuildInfo:
   val version: String = Option(props.getProperty("version")).getOrElse("0.0.0-unknown")
   val name: String = Option(props.getProperty("name")).getOrElse("TACIT")
 
+/** API reference displayed by show_interface. Mirrors the API surface that
+  * ManagedRepl.libraryPreamble actually imports: core docs are included when
+  * no plugin is loaded or every plugin uses `extend-core`, and omitted when
+  * any plugin uses `replace-core`.
+  */
+private[tacit] def computeInterfaceReference(using Context): String =
+  val preamble =
+    """|IMPORTANT: You must only use the provided interface below to interact with the system.
+       |Do not use Java/Scala standard library APIs (java.io, java.nio, scala.io, sys.process, java.net, etc.) to access files, run processes, or make network requests directly.
+       |All system interactions must go through the capability-scoped API so that access is properly sandboxed and auditable.
+       |
+       |The interface is pre-loaded and available in all code executions.
+       |
+       |""".stripMargin
+
+  val plugins = ctx.plugins
+  if plugins.isEmpty then preamble + coreInterfaceReference
+  else
+    val includeCore = plugins.forall(_.manifest.apiMode == ApiMode.ExtendCore)
+    val coreDocs    = Option.when(includeCore)(coreInterfaceReference).toList
+    val pluginDocs  = plugins.map: p =>
+      s"## ${p.manifest.name}\n\n${p.apiDocs}"
+    preamble + pluginSummary(plugins) + "# Available API\n\n" +
+      (coreDocs ++ pluginDocs).mkString("\n\n---\n\n")
+
+/** Core API reference, bundled inside the library JAR as `Interface.scala.txt`
+  * (it lives with the library it documents, not on the server's classpath). */
+private def coreInterfaceReference(using Context): String =
+  ManagedRepl.readLibraryResource("Interface.scala.txt") match
+    case Some(content) => "```scala\n" + content + "\n```"
+    case None =>
+      System.err.println("[TACIT MCP] WARNING: Interface.scala resource not found in library JAR")
+      "(Interface.scala source not found in library JAR)"
+
+private def pluginSummary(plugins: List[LoadedPlugin]): String =
+  val rows = plugins.map: p =>
+    val m = p.manifest
+    val domain      = m.domain.fold("")(d => s"\nDomain: $d")
+    val description = m.description.fold("")(d => s"\n$d")
+    s"""|## ${m.name} ${m.version}
+        |ID: ${m.id}
+        |Mode: ${renderApiMode(m.apiMode)}$domain$description
+        |""".stripMargin
+  "# Loaded TACIT plugins\n\n" + rows.mkString("\n") + "\n\n"
+
+private def renderApiMode(mode: ApiMode): String = mode match
+  case ApiMode.ExtendCore  => "extend-core"
+  case ApiMode.ReplaceCore => "replace-core"
+
 /** MCP Server implementation for Scala code execution */
 class McpServer(using Context):
   private val ProtocolVersion = "2025-11-25"
 
   private val sessionManager = SessionManager()
-
-  /** The Interface.scala source, read from the library JAR (where it is bundled),
-   *  displayed by show_interface. */
-  private lazy val interfaceReference: String =
-    val preamble =
-      """|IMPORTANT: You must only use the provided interface below to interact with the system.
-         |Do not use Java/Scala standard library APIs (java.io, java.nio, scala.io, sys.process, java.net, etc.) to access files, run processes, or make network requests directly.
-         |All system interactions must go through the capability-scoped API so that access is properly sandboxed and auditable.
-         |
-         |The interface is pre-loaded and available in all code executions.
-         |
-         |""".stripMargin
-    val source = ManagedRepl.readLibraryResource("Interface.scala.txt") match
-      case Some(content) => "```scala\n" + content + "\n```"
-      case None =>
-        System.err.println("[TACIT MCP] WARNING: Interface.scala resource not found in library JAR")
-        "(Interface.scala source not found in library JAR)"
-    preamble + source
 
   private inline def recorder: Option[CodeRecorder] = ctx.recorder
   private inline def sessionEnabled: Boolean = ctx.config.sessionEnabled
@@ -174,7 +205,7 @@ class McpServer(using Context):
     Right(CallToolResult(content = List(TextContent(text))))
   
   private def showInterface(): Either[String, CallToolResult] =
-    Right(CallToolResult(content = List(TextContent(interfaceReference))))
+    Right(CallToolResult(content = List(TextContent(computeInterfaceReference))))
 
   private def formatExecutionResult(result: ExecutionResult): CallToolResult =
     val output = result.error match

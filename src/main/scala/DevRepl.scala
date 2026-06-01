@@ -21,12 +21,16 @@ import org.jline.terminal.{Terminal, TerminalBuilder}
 @main def StartDevRepl(args: String*): Unit =
   Config.parseCliArgs(args.toArray) match
     case None =>
-    case Some(config) => usingContext(config):
-      if !config.quiet then printBanner(config)
-      val repl = ManagedRepl().init()
-      val terminal = TerminalBuilder.builder().system(true).dumb(true).build()
-      try readEvalLoop(repl, terminal)
-      finally terminal.close()
+    case Some(config) => PluginLoader.loadAll(config.pluginJars, config.pluginScanDirs) match
+      case Left(err) =>
+        System.err.println(s"Error: $err")
+        sys.exit(1)
+      case Right(plugins) => usingContext(config, plugins):
+        if !config.quiet then printBanner(config)
+        val repl = ManagedRepl().init()
+        val terminal = TerminalBuilder.builder().system(true).dumb(true).build()
+        try readEvalLoop(repl, terminal)
+        finally terminal.close()
 
 private def printBanner(config: Config): Unit =
   System.err.println(

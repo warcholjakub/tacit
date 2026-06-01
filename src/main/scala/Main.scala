@@ -23,21 +23,25 @@ import scala.util.control.NonFatal
 
   Config.parseCliArgs(args.toArray) match
     case None => ()  // errors already displayed by the parser
-    case Some(config) => usingContext(config):
-      val server = McpServer()
-      val stdinLines = scala.io.Source.fromInputStream(System.in).getLines()
-      val writer = PrintWriter(jsonRpcOut, true)
+    case Some(config) => PluginLoader.loadAll(config.pluginJars, config.pluginScanDirs) match
+      case Left(err) =>
+        System.err.println(s"Error: $err")
+        sys.exit(1)
+      case Right(plugins) => usingContext(config, plugins):
+        val server = McpServer()
+        val stdinLines = scala.io.Source.fromInputStream(System.in).getLines()
+        val writer = PrintWriter(jsonRpcOut, true)
 
-      if !config.quiet then printStartupBanner(config)
+        if !config.quiet then printStartupBanner(config)
 
-      try
-        for line <- stdinLines if line.trim.nonEmpty do
-          try handleLine(line, writer, server)
-          catch
-            case NonFatal(e) =>
-              error(s"Request failed: ${e.getMessage}")
-              e.printStackTrace(System.err)
-      finally log("Server shutting down...")
+        try
+          for line <- stdinLines if line.trim.nonEmpty do
+            try handleLine(line, writer, server)
+            catch
+              case NonFatal(e) =>
+                error(s"Request failed: ${e.getMessage}")
+                e.printStackTrace(System.err)
+        finally log("Server shutting down...")
 
 private def handleLine(line: String, writer: PrintWriter, server: McpServer)(using Context): Unit =
   log(s"Received: ${line.take(200)}...")
