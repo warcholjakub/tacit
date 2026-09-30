@@ -106,13 +106,16 @@ object ManagedRepl:
       "-Wsafe-init",
       "-language:experimental.captureChecking",
       "-language:experimental.modularity",
-      // Only REPL-defined classes get the interrupt instrumentation. With the
-      // default (`true`) the REPL loader re-defines every non-JDK class it
-      // touches, including the library's, so the library would exist twice
-      // (once in `sandboxedClassLoader`, once instrumented in the REPL loader)
-      // with separate static state, and the config registered by
-      // `configureLibrary` would not be the one agent code sees.
-      "-Xrepl-interrupt-instrumentation:local"
+      // No interrupt instrumentation. With the default (`true`) the REPL
+      // loader re-defines every non-JDK class it touches, including the
+      // library's, so the library would exist twice (once in
+      // `sandboxedClassLoader`, once instrumented in the REPL loader) with
+      // separate static state, and the config registered by
+      // `configureLibrary` would not be the one agent code sees. `local`
+      // instruments REPL code with calls to `dotty.tools.repl.StopRepl`, which
+      // the sandboxed parent loader cannot resolve. Nothing here sets the
+      // REPL stop flag anyway: timeouts rely on `Thread.interrupt`.
+      "-Xrepl-interrupt-instrumentation:false"
     )
 
   /** Exposes only JDK platform classes and the library JARs (core + plugins),
@@ -316,10 +319,8 @@ class ManagedRepl(using Context):
     *
     * On timeout the client gets a prompt error instead of hanging, and the
     * session keeps its prior state (the abandoned statement has no observable
-    * effect). The interrupt is best-effort: the REPL instruments loops in
-    * REPL-defined classes with interruption checks
-    * (`-Xrepl-interrupt-instrumentation:local`), and blocking I/O and sleeps
-    * respond to it, but a CPU-bound loop inside library or JDK code keeps
+    * effect). The interrupt is best-effort: blocking I/O and sleeps respond to
+    * it, but a CPU-bound loop (in REPL, library or JDK code) keeps
     * running in the background and continues to hold the process-global
     * output lock. This is *not* a hard sandbox; true preemption requires
     * process isolation.
