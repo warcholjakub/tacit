@@ -11,8 +11,8 @@ class VirtualEnvSuite extends munit.FunSuite:
   // allowedRoots "/" opts out of the default working-directory bound; these
   // tests exercise file operations on a virtual root, not the bound itself.
   val interface: Interface^{} = new InterfaceImpl("""{"allowedRoots": ["/"]}""") {
-    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-      new VirtualFileSystem(root, filter, classifiedPatterns = classifiedPatterns, classifiedWrite = classifiedWrite)
+    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+      new VirtualFileSystem(root, filter, classifiedPatterns = classifiedPatterns, classifiedWrite = classifiedWrite, readOnly = readOnly)
   }.unsafeAssumePure
 
   import interface.*
@@ -24,6 +24,21 @@ class VirtualEnvSuite extends munit.FunSuite:
       val file = access("/virtual/new.txt")
       file.write("new content")
       assertEquals(file.read(), "new content")
+    }
+  }
+
+  test("virtual: a read-only scope rejects every write") {
+    requestFileSystem("/virtual-ro", FileAccess.ReadOnly) {
+      val file = access("/virtual-ro/data.txt")
+      List[(String, () => Unit)](
+        "write" -> (() => file.write("x")),
+        "append" -> (() => file.append("x")),
+        "delete" -> (() => file.delete()),
+        "mkdir" -> (() => access("/virtual-ro/dir").mkdir())
+      ).foreach: (op, run) =>
+        val ex = intercept[SecurityException](run())
+        assert(ex.getMessage.nn.contains(s"'$op' needs write access"), ex.getMessage)
+      assert(!file.exists)
     }
   }
 

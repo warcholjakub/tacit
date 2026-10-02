@@ -7,6 +7,12 @@ case class Context(
   config: Config,
   recorder: Option[CodeRecorder],
   plugins: List[LoadedPlugin] = Nil,
+  /** Host callback asked when agent code requests access outside the
+    * configured bounds: takes a JSON request (e.g.
+    * `{"kind":"filesystem","root":"..","resolved":".."}`) and returns
+    * `{"allow":true}` or `{"allow":false,"message":".."}`. Without one, such
+    * requests are denied. */
+  permissionOracle: Option[String => String] = None,
 )
 
 object Context:

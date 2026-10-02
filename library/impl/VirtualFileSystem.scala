@@ -12,7 +12,8 @@ class VirtualFileSystem private[library] (
   check: String -> Boolean = _ => true,
   initialFiles: Map[String, String] = Map.empty,
   protected val classifiedPatterns: Set[String] = Set.empty,
-  classifiedWrite: Boolean = true
+  classifiedWrite: Boolean = true,
+  protected override val readOnly: Boolean = false
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
   protected val normalizedRoot: Path = Paths.get(root).toAbsolutePath.normalize
@@ -53,11 +54,13 @@ class VirtualFileSystem private[library] (
       getOrThrow(resolved)
 
     def write(content: String): Unit =
+      requireWritable("write")
       requireNotClassified(resolved, "write")
       ensureParentDirs(resolved)
       files(resolved) = content.getBytes(StandardCharsets.UTF_8)
 
     def append(content: String): Unit =
+      requireWritable("append")
       requireNotClassified(resolved, "append")
       ensureParentDirs(resolved)
       files.updateWith(resolved):
@@ -77,6 +80,7 @@ class VirtualFileSystem private[library] (
       content.linesIterator.zipWithIndex.foreach((line, idx) => op(line, idx + 1))
 
     def delete(): Unit =
+      requireWritable("delete")
       requireNotClassified(resolved, "delete")
       if !files.contains(resolved) then
         throw java.nio.file.NoSuchFileException(resolved.toString)
@@ -84,6 +88,7 @@ class VirtualFileSystem private[library] (
       ()
 
     def mkdir(): Unit =
+      requireWritable("mkdir")
       requireCreatable(resolved, "mkdir")
       ensureParentDirs(resolved)
       directories(resolved) = ()
@@ -123,6 +128,7 @@ class VirtualFileSystem private[library] (
       ClassifiedImpl.wrap(String(bytes, StandardCharsets.UTF_8))
 
     def writeClassified(content: Classified[String]): Unit =
+      requireWritable("writeClassified")
       requireClassifiedWritable(resolved, "writeClassified")
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>

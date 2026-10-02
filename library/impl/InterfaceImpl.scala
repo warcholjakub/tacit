@@ -65,14 +65,18 @@ abstract class InterfaceImpl private[library] (
    *  default; tests override it with a [[VirtualFileSystem]]. The
    *  `classifiedWrite` gate is passed explicitly so an override cannot
    *  silently drop it (the entry-level `writeClassified`/`mkdir` checks live
-   *  in the file system, not here). */
+   *  in the file system, not here).
+   *
+   *  `root` arrives canonical: absolute, normalized and with symlinks
+   *  resolved, exactly as it was checked against the bounds. */
   protected def createFS(
     root: String,
     filter: String -> Boolean,
     classifiedPatterns: Set[String],
-    classifiedWrite: Boolean
+    classifiedWrite: Boolean,
+    readOnly: Boolean
   ): FileSystem =
-    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
 
   export FileOps.*
   export ProcessOps.*
@@ -102,62 +106,118 @@ abstract class InterfaceImpl private[library] (
     scala.Predef.printf(fmt, args.map(maskForMain)*)
     withSecureOut(scala.Predef.printf(fmt, args.map(unwrapForSecure)*))
 
-  /** Resolves a path to the same canonical form [[RealFileSystem]] uses for its
-   *  root: absolute + normalized, then through symlinks when the path exists.
-   *  Resolving symlinks matters for the bound check below. Otherwise a symlink
-   *  *named* inside an allowed root but *pointing* outside it would pass. */
+  /** Resolves a path to the canonical form used by the bound check below and
+   *  sent to the permission oracle: absolute + normalized, then through
+   *  symlinks. Resolving symlinks matters for the bound check. Otherwise a
+   *  symlink *named* inside an allowed root but *pointing* outside it would
+   *  pass. A path that does not exist yet is resolved through its longest
+   *  existing ancestor, so it keeps the same form once it is created. */
   private def resolveRootForBound(p: String): Path =
-    val abs = Paths.get(p).toAbsolutePath.nn.normalize.nn
-    if Files.exists(abs) then abs.toRealPath().nn else abs
+    InterfaceImpl.canonical(Paths.get(p).toAbsolutePath.nn.normalize.nn)
 
   /** Entry-time outer-bound check for [[requestFileSystem]]: the requested root
    *  must resolve to a path equal to, or nested under, one of `allowedRoots`
    *  (which defaults to the current working directory). */
-  private def requireRootAllowed(root: String): Unit =
+  /** Returns the canonical root that was checked (and maybe approved), so the
+   *  file system is built on exactly that path. */
+  private def requireRootAllowed(root: String, access: FileAccess, reason: String): Path =
     val resolved = resolveRootForBound(root)
     val permitted = allowedRoots.exists(allowed => resolved.startsWith(resolveRootForBound(allowed)))
-    if !permitted then
-      throw SecurityException(
-        s"Access denied: filesystem root '$root' is not within any allowed root $allowedRoots"
+    if permitted then resolved
+    else
+      val request = io.circe.Json.obj(
+        "kind" -> io.circe.Json.fromString("filesystem"),
+        "root" -> io.circe.Json.fromString(root),
+        "resolved" -> io.circe.Json.fromString(resolved.toString),
+        "access" -> io.circe.Json.fromString(access match
+          case FileAccess.ReadOnly => "read"
+          case FileAccess.ReadWrite => "write"),
+        "reason" -> io.circe.Json.fromString(reason)
       )
+      InterfaceImpl.askPermission(request) match
+        case PermissionAnswer.Allow => resolved
+        case PermissionAnswer.Deny(Some(message)) => throw SecurityException(message)
+        case PermissionAnswer.Deny(None) =>
+          throw SecurityException(
+            s"Access denied: filesystem root '$root' is not within any allowed root $allowedRoots"
+          )
 
-  def requestFileSystem[T](root: String)(op: FileSystem^ ?=> T)(using IOCapability): T =
-    requireRootAllowed(root)
-    val fs = createFS(root, _ => true, classifiedPatterns, classifiedWriteEnabled)
+  def requestFileSystem[T](
+    root: String,
+    access: FileAccess = FileAccess.ReadWrite,
+    reason: String = ""
+  )(op: FileSystem^ ?=> T)(using IOCapability): T =
+    val checkedRoot = requireRootAllowed(root, access, reason)
+    val fs = createFS(
+      checkedRoot.toString, _ => true, classifiedPatterns, classifiedWriteEnabled,
+      readOnly = access == FileAccess.ReadOnly
+    )
     op(using fs)
 
-  /** Entry-time subset check shared by [[requestExecPermission]] and
+  /** Entry-time check shared by [[requestExecPermission]] and
    *  [[requestNetwork]]: each item in `scope` must match at least one pattern
-   *  in `policy`. For command patterns that carry args (e.g. `"sbt run *"`),
-   *  we match against the pattern's command-word (the part before the first
-   *  space) so a bare scope command like `"sbt"` passes entry — per-invocation
-   *  arg filtering still happens at runtime. */
-  private def requireSubset(
+   *  in `policy`, or be granted by the host's permission oracle. For command
+   *  patterns that carry args (e.g. `"sbt run *"`), we match against the
+   *  pattern's command-word (the part before the first space) so a bare scope
+   *  command like `"sbt"` passes entry — per-invocation arg filtering still
+   *  happens at runtime. Returns the items the oracle granted. */
+  private def requireWithinPolicy(
     scope: Set[String],
-    policy: Set[String],
-    kind: String
-  ): Unit =
-    scope.foreach: item =>
-      val matched = policy.exists: pattern =>
-        val head = pattern.takeWhile(_ != ' ')
-        GlobMatcher.matches(item, head)
-      if !matched then
-        throw SecurityException(
-          s"Access denied: scope $kind '$item' is not permitted by server policy $policy"
-        )
+    policy: Option[Set[String]],
+    kind: String,
+    label: String,
+    details: (String, io.circe.Json)*
+  ): Set[String] =
+    policy match
+      case None => Set.empty
+      case Some(patterns) =>
+        val outside = scope.filterNot: item =>
+          patterns.exists(pattern => GlobMatcher.matches(item, pattern.takeWhile(_ != ' ')))
+        if outside.isEmpty then Set.empty
+        else
+          val request = io.circe.Json.obj(
+            Seq(
+              "kind" -> io.circe.Json.fromString(kind),
+              "items" -> io.circe.Json.arr(outside.toList.sorted.map(io.circe.Json.fromString)*)
+            ) ++ details*
+          )
+          InterfaceImpl.askPermission(request) match
+            case PermissionAnswer.Allow => outside
+            case PermissionAnswer.Deny(Some(message)) => throw SecurityException(message)
+            case PermissionAnswer.Deny(None) =>
+              throw SecurityException(
+                s"Access denied: scope $label '${outside.toList.sorted.head}' is not permitted by server policy $patterns"
+              )
 
-  def requestExecPermission[T](commands: Set[String])(op: ProcessPermission^ ?=> T)(using IOCapability): T =
+  def requestExecPermission[T](
+    commands: Set[String],
+    reason: String = ""
+  )(op: ProcessPermission^ ?=> T)(using IOCapability): T =
     // Server-configured commandPermissions is the outer bound: every command
-    // the scope declares must be permitted by some pattern's command-word.
-    commandPermissions.foreach(p => requireSubset(commands, p, "command"))
-    val perm = new ProcessPermissionImpl(commands, strictMode, commandPermissions)
+    // the scope declares must be permitted by some pattern's command-word, or
+    // granted by the host. A granted command may run with any arguments.
+    val granted = requireWithinPolicy(
+      commands, commandPermissions, "exec", "command",
+      "reason" -> io.circe.Json.fromString(reason)
+    )
+    val perm = new ProcessPermissionImpl(commands, strictMode, commandPermissions, granted)
     op(using perm)
 
-  def requestNetwork[T](hosts: Set[String])(op: Network^ ?=> T)(using IOCapability): T =
+  def requestNetwork[T](
+    hosts: Set[String],
+    access: NetworkAccess = NetworkAccess.Send,
+    reason: String = ""
+  )(op: Network^ ?=> T)(using IOCapability): T =
     // Server-configured networkPermissions is the outer bound: every host the
-    // scope declares must match at least one pattern.
-    networkPermissions.foreach(p => requireSubset(hosts, p, "host"))
-    val net = new NetworkImpl(hosts)
+    // scope declares must match at least one pattern, or be granted by the host.
+    val _ = requireWithinPolicy(
+      hosts, networkPermissions, "network", "host",
+      "access" -> io.circe.Json.fromString(access match
+        case NetworkAccess.Fetch => "fetch"
+        case NetworkAccess.Send => "send"),
+      "reason" -> io.circe.Json.fromString(reason)
+    )
+    val net = new NetworkImpl(hosts, access)
     op(using net)
 
   def classify[T](value: T): Classified[T] = ClassifiedImpl.wrap(value)
@@ -195,6 +255,39 @@ object InterfaceImpl:
     configured.get() match
       case null => throw IllegalStateException("The TACIT sandbox has not been configured.")
       case json => json
+
+  /** The host's answer to requests outside the configured bounds, registered
+    * once by the server via [[installPermissionOracle]]. It takes a JSON request
+    * and returns a JSON answer, so it only needs JDK types to cross from the
+    * server's class loader into this sandboxed one. */
+  private val permissionOracle =
+    java.util.concurrent.atomic.AtomicReference[java.util.function.Function[String, String] | Null](null)
+
+  /** Register the host's permission oracle. Like [[configure]], it is not
+    * reachable from agent code and can only be set once per sandbox. */
+  private[library] def installPermissionOracle(oracle: java.util.function.Function[String, String]): Unit =
+    if !permissionOracle.compareAndSet(null, oracle) then
+      throw SecurityException("The TACIT permission oracle is already installed.")
+
+  /** Asks the host about a request outside the configured bounds. Without an
+    * oracle, on an answer it cannot parse, or if the oracle fails, the request
+    * is denied: host errors must not reach agent code. */
+  private[library] def askPermission(request: io.circe.Json): PermissionAnswer =
+    permissionOracle.get() match
+      case null => PermissionAnswer.Deny(None)
+      case oracle =>
+        scala.util.Try(oracle.apply(request.noSpaces)).toOption.flatMap(Option(_)) match
+          case Some(answer) => PermissionAnswer.fromJson(answer)
+          case None => PermissionAnswer.Deny(None)
+
+  /** `toRealPath` of `path` if it exists, otherwise the real path of its
+    * nearest existing ancestor with the remaining components appended. */
+  private[library] def canonical(path: Path): Path =
+    if Files.exists(path) then path.toRealPath().nn
+    else
+      Option(path.getParent) match
+        case Some(parent) => canonical(parent).resolve(path.getFileName.nn).nn
+        case None => path
 
   /** The server process's current working directory, used as the default
     * `allowedRoots` bound. Falls back to "." if the `user.dir` property is
@@ -246,3 +339,16 @@ object InterfaceImpl:
   * `object`. */
 @assumeSafe
 abstract class SandboxInterface extends InterfaceImpl(InterfaceImpl.configuredJson)
+
+/** The host's decision on a request outside the configured bounds. */
+private[library] enum PermissionAnswer:
+  case Allow
+  case Deny(message: Option[String])
+
+private[library] object PermissionAnswer:
+  /** `{"allow": true}` or `{"allow": false, "message": "..."}`. */
+  def fromJson(json: String): PermissionAnswer =
+    io.circe.parser.parse(json).toOption.map(_.hcursor) match
+      case Some(c) if c.get[Boolean]("allow").contains(true) => Allow
+      case Some(c) => Deny(c.get[String]("message").toOption)
+      case None => Deny(None)

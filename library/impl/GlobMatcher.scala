@@ -22,14 +22,15 @@ object GlobMatcher:
 
   /** Compile a glob into a regex `Pattern`. Not memoized: callers that hold a
    *  fixed set of patterns (a scope's declared hosts) should compile once and
-   *  keep the result themselves. */
+   *  keep the result themselves. `*` also matches line breaks, so a pattern
+   *  like `"git commit *"` covers multi-line arguments. */
   def compile(pattern: String): Pattern =
     val sb = StringBuilder()
     pattern.foreach:
       case '*'                               => sb.append(".*")
       case c if "\\^$.|?+(){}[]".contains(c) => sb.append('\\').append(c)
       case c                                 => sb.append(c)
-    Pattern.compile(sb.toString)
+    Pattern.compile(sb.toString, Pattern.DOTALL)
 
   def matches(value: String, pattern: String): Boolean =
     val cached = cache.get(pattern)

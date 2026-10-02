@@ -9,6 +9,9 @@ import scala.util.{Try, Success, Failure}
 object WebOps:
   private val TimeoutMs = 10000
 
+  /** Methods allowed under `NetworkAccess.Fetch`, as long as there is no body. */
+  private val FetchMethods = Set("GET", "HEAD")
+
   /** Parses `url` once and validates its host against `net`. Returns the parsed
    *  URI so the subsequent request dials the same URL the check approved
    *  (parsing twice is a foot-gun: the two parses could disagree). */
@@ -80,6 +83,7 @@ object WebOps:
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): String =
+    net.requireSend("POST")
     val conn = openConnection(validatedUri(url))
     try
       conn.setRequestMethod("POST")
@@ -95,6 +99,8 @@ object WebOps:
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): HttpResponse =
+    if !(FetchMethods.contains(method.toUpperCase) && body.isEmpty) then
+      net.requireSend(method.toUpperCase)
     val conn = openConnection(validatedUri(url))
     try
       conn.setRequestMethod(method.toUpperCase)
@@ -110,6 +116,7 @@ object WebOps:
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): Classified[String] =
+    net.requireSend("POST")
     ClassifiedImpl.unwrap(body) match
       // Run the POST eagerly with the unwrapped secret, then re-classify the
       // outcome (response or failure) so it stays under information-flow control.

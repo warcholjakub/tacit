@@ -19,8 +19,8 @@ class LibrarySuite extends munit.FunSuite:
   // tests operate on per-test temp dirs, not on the bound itself (which has its
   // own dedicated tests below).
   private val interface: Interface^{} = new InterfaceImpl("""{"allowedRoots": ["/"]}""") {
-    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-      new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+      new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
   }.unsafeAssumePure
 
   import interface.*
@@ -210,8 +210,8 @@ class LibrarySuite extends munit.FunSuite:
     val classifiedInterface: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"]}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     import classifiedInterface.*
 
@@ -255,8 +255,8 @@ class LibrarySuite extends munit.FunSuite:
     val secureInterface: Interface^ = new InterfaceImpl(
       io.circe.Json.obj("secureOutput" -> io.circe.Json.fromString(secureFile.toString)).noSpaces
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     given (IOCapability^{}) = null.asInstanceOf[IOCapability]
 
@@ -355,8 +355,8 @@ class LibrarySuite extends munit.FunSuite:
         "allowedRoots" -> io.circe.Json.fromValues(roots.map(io.circe.Json.fromString))
       ).noSpaces
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
 
   test("allowedRoots permits a root nested within the bound") {
@@ -422,8 +422,8 @@ class LibrarySuite extends munit.FunSuite:
     // closed). A fresh interface with no allowedRoots must allow the CWD but
     // deny a temp dir that lives outside it.
     val api: Interface^ = new InterfaceImpl("{}") {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     val cwd = java.nio.file.Paths.get(System.getProperty("user.dir").nn)
     assertEquals(api.requestFileSystem(cwd.toString) { 1 }, 1)   // CWD is permitted
@@ -444,8 +444,8 @@ class LibrarySuite extends munit.FunSuite:
     val classifiedInterface: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"]}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     classifiedInterface.requestFileSystem(tmpDir.toString) {
       classifiedInterface.access(tmpDir.resolve("public.txt").toString).write("needle visible")
@@ -464,8 +464,8 @@ class LibrarySuite extends munit.FunSuite:
     val classifiedInterface: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"]}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     classifiedInterface.requestFileSystem(tmpDir.toString) {
       classifiedInterface.access(secretDir.resolve("hidden.txt").toString)
@@ -484,8 +484,8 @@ class LibrarySuite extends munit.FunSuite:
     val gated: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"], "classifiedWrite": false}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     gated.requestFileSystem(tmpDir.toString) {
       val ex1 = intercept[SecurityException] {
@@ -506,8 +506,8 @@ class LibrarySuite extends munit.FunSuite:
     val open: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"]}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     open.requestFileSystem(tmpDir.toString) {
       open.writeClassified(secretDir.resolve("ok.txt").toString, open.classify("data"))
@@ -626,8 +626,8 @@ class LibrarySuite extends munit.FunSuite:
     val gated: Interface^ = new InterfaceImpl(
       """{"strictMode": false, "classifiedPaths": ["secret"], "allowedRoots": ["/"], "classifiedWrite": false}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     gated.requestFileSystem(tmpDir.toString) {
       val ex = intercept[SecurityException] { gated.access(tmpDir.resolve("secret").toString).mkdir() }
@@ -649,8 +649,8 @@ class LibrarySuite extends munit.FunSuite:
     val patternApi: Interface^ = new InterfaceImpl(
       s"""{"strictMode": false, "classifiedPaths": ["${secretDir.toString}"], "allowedRoots": ["/"]}"""
     ) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
     }
     patternApi.requestFileSystem(tmpDir.toString) {
       // First check while the directory does not exist: patterns get prepared here.

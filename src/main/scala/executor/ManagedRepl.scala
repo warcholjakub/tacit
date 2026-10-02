@@ -149,9 +149,19 @@ object ManagedRepl:
     * depends on `api` having been touched first would be safe.
     */
   private def configureLibrary(loader: ClassLoader, libraryConfigJson: String): Unit =
+    invokeLibrary(loader, "configure", classOf[String], libraryConfigJson)
+
+  /** Register the host's permission oracle the same way. It is passed as a
+    * JDK `Function` so it crosses the class-loader boundary. */
+  private def installPermissionOracle(loader: ClassLoader, oracle: String => String): Unit =
+    val function: java.util.function.Function[String, String] = oracle(_)
+    invokeLibrary(loader, "installPermissionOracle", classOf[java.util.function.Function[?, ?]], function)
+
+  private def invokeLibrary(loader: ClassLoader, method: String, paramType: Class[?], arg: AnyRef): Unit =
     val module = Class.forName("tacit.library.InterfaceImpl$", true, loader)
     val instance = module.getField("MODULE$").get(null)
-    try module.getMethod("configure", classOf[String]).invoke(instance, libraryConfigJson)
+    try
+      val _ = module.getMethod(method, paramType).invoke(instance, arg)
     catch case e: java.lang.reflect.InvocationTargetException =>
       throw Option(e.getCause).getOrElse(e)
 
@@ -232,6 +242,7 @@ class ManagedRepl(using Context):
     */
   def init(): this.type =
     configureLibrary(sandboxLoader, ctx.config.libraryConfig.noSpaces)
+    ctx.permissionOracle.foreach(installPermissionOracle(sandboxLoader, _))
     state = driver.run(libraryPreamble)(using state)
     if ctx.config.safeMode then
       state = driver.run("import language.experimental.safe")(using state)

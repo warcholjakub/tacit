@@ -71,6 +71,24 @@ case class ProcessResult(exitCode: Int, stdout: String, stderr: String)
 @assumeSafe
 case class HttpResponse(status: Int, body: String)
 
+/** What a `requestFileSystem` scope may do. Ask for `ReadOnly` unless the
+ *  task writes: read-only scopes reject `write`, `append`, `delete`, `mkdir`
+ *  and `writeClassified`. */
+@assumeSafe
+enum FileAccess:
+  @assumeSafe case ReadOnly
+  @assumeSafe case ReadWrite
+
+/** What a `requestNetwork` scope may do. `Fetch` allows only GET and HEAD
+ *  requests without a body (`httpGet`, or `httpRequest` with those methods);
+ *  `Send` also allows POST, PUT, DELETE and request bodies. Ask for `Fetch`
+ *  unless the task sends data. Note that a fetch can still carry data in
+ *  its URL (path or query) and headers. */
+@assumeSafe
+enum NetworkAccess:
+  @assumeSafe case Fetch
+  @assumeSafe case Send
+
 // ─── Capabilities ───────────────────────────────────────────────────────────
 
 /** Capability granting access to a set of network hosts.
@@ -81,6 +99,8 @@ case class HttpResponse(status: Int, body: String)
 @assumeSafe
 abstract class Network private[library] () extends caps.SharedCapability:
   def validateHost(host: String): Unit
+  /** Throws unless the scope was requested with `NetworkAccess.Send`. */
+  private[library] def requireSend(method: String): Unit
 
 /** Capability granting permission to run a set of commands.
  *  Obtained via `requestExecPermission(commands)`.
@@ -138,7 +158,9 @@ trait Interface:
   // ── File System ─────────────────────────────────────────────────────
 
   /** Request a `FileSystem` scoped to the subtree under `root`.
-   *  Paths outside `root` throw `SecurityException`.
+   *  Paths outside `root` throw `SecurityException`. `access` limits what the
+   *  scope may do (see [[FileAccess]]); `reason` says why you need it and may
+   *  be shown to the user when the request needs their approval.
    *
    *  ```
    *  requestFileSystem("/home/user/project") {
@@ -147,8 +169,15 @@ trait Interface:
    *    access("/home/user/project/out/result.txt").write("done")
    *    access("/home/user/project/src").children.foreach(f => println(f.name))
    *  }
+   *  requestFileSystem("/home/user/notes", FileAccess.ReadOnly, "to summarize the notes") {
+   *    access("/home/user/notes/todo.md").read()
+   *  }
    *  ``` */
-  def requestFileSystem[T](root: String)(op: FileSystem^ ?=> T)(using IOCapability): T
+  def requestFileSystem[T](
+    root: String,
+    access: FileAccess = FileAccess.ReadWrite,
+    reason: String = ""
+  )(op: FileSystem^ ?=> T)(using IOCapability): T
 
   /** Get a `FileEntry` handle for `path`. */
   def access(path: String)(using fs: FileSystem): FileEntry^{fs}
@@ -201,12 +230,16 @@ trait Interface:
   /** Request a `ProcessPermission` for the given command names.
    *
    *  ```
-   *  requestExecPermission(Set("pip", "python")) {
+   *  requestExecPermission(Set("pip", "python"), "to run the test script") {
    *    exec("pip", List("install", "."))
    *    execOutput("python", List("script.py"))
    *  }
-   *  ``` */
-  def requestExecPermission[T](commands: Set[String])(op: ProcessPermission^ ?=> T)(using IOCapability): T
+   *  ```
+   *  `reason` says why you need the commands and may be shown to the user. */
+  def requestExecPermission[T](
+    commands: Set[String],
+    reason: String = ""
+  )(op: ProcessPermission^ ?=> T)(using IOCapability): T
 
   /** Run `command` with `args`. Returns exit code, stdout, and stderr.
    *  Throws `RuntimeException` on timeout. */
@@ -233,8 +266,17 @@ trait Interface:
    *    val resp = httpPost("https://api.example.com/v1/data",
    *                        """{"key": "value"}""")
    *  }
-   *  ``` */
-  def requestNetwork[T](hosts: Set[String])(op: Network^ ?=> T)(using IOCapability): T
+   *  requestNetwork(Set("api.example.com"), NetworkAccess.Fetch, "to check the status") {
+   *    httpGet("https://api.example.com/v1/status")
+   *  }
+   *  ```
+   *  `access` limits the requests the scope may make (see [[NetworkAccess]]);
+   *  `reason` says why you need it and may be shown to the user. */
+  def requestNetwork[T](
+    hosts: Set[String],
+    access: NetworkAccess = NetworkAccess.Send,
+    reason: String = ""
+  )(op: Network^ ?=> T)(using IOCapability): T
 
   /** HTTP GET. Returns the response body. Host must be in the allowed set.
    *

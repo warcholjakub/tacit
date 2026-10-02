@@ -19,12 +19,12 @@ class RealFileSystem private[library] (
   val root: String,
   check: String -> Boolean = _ => true,
   protected val classifiedPatterns: Set[String] = Set.empty,
-  classifiedWrite: Boolean = true
+  classifiedWrite: Boolean = true,
+  protected override val readOnly: Boolean = false
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
   protected val normalizedRoot: Path =
-    val abs = Paths.get(root).toAbsolutePath.normalize
-    if Files.exists(abs) then abs.toRealPath() else abs
+    InterfaceImpl.canonical(Paths.get(root).toAbsolutePath.normalize)
   protected def pathCheck(relativePath: String): Boolean = check(relativePath)
 
   /** Resolves symlinks in a path. For existing paths, uses `toRealPath()`.
@@ -106,6 +106,7 @@ class RealFileSystem private[library] (
       requireNotClassified(p, "readBytes")
       Files.readAllBytes(p)
     def write(content: String): Unit =
+      requireWritable("write")
       val p = revalidate()
       requireNotClassified(p, "write")
       Files.createDirectories(p.getParent)
@@ -113,6 +114,7 @@ class RealFileSystem private[library] (
       ()
 
     def append(content: String): Unit =
+      requireWritable("append")
       val p = revalidate()
       requireNotClassified(p, "append")
       Files.createDirectories(p.getParent)
@@ -140,11 +142,13 @@ class RealFileSystem private[library] (
       finally reader.close()
 
     def delete(): Unit =
+      requireWritable("delete")
       val p = revalidate()
       requireNotClassified(p, "delete")
       Files.delete(p)
 
     def mkdir(): Unit =
+      requireWritable("mkdir")
       val p = revalidate()
       requireCreatable(p, "mkdir")
       Files.createDirectories(p)
@@ -188,6 +192,7 @@ class RealFileSystem private[library] (
       ClassifiedImpl.wrap(String(Files.readAllBytes(p), StandardCharsets.UTF_8))
 
     def writeClassified(content: Classified[String]): Unit =
+      requireWritable("writeClassified")
       val p = revalidate()
       requireClassifiedWritable(p, "writeClassified")
       ClassifiedImpl.unwrap(content) match

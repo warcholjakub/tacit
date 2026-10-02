@@ -139,19 +139,9 @@ abstract class BaseFileSystem extends FileSystem:
       val prefix =
         if firstGlob == count then path  // no glob chars at all
         else root.resolve(path.subpath(0, firstGlob))
-      val resolved = realPathOfNearestAncestor(prefix.toAbsolutePath.normalize)
+      val resolved = InterfaceImpl.canonical(prefix.toAbsolutePath.normalize)
       if firstGlob == count then resolved.toString
       else resolved.resolve(path.subpath(firstGlob, count)).toString
-
-  /** `toRealPath` of `abs` if it exists, otherwise the real path of its
-    * nearest existing ancestor with the remaining components appended. */
-  private def realPathOfNearestAncestor(abs: Path): Path =
-    if java.nio.file.Files.exists(abs) then abs.toRealPath()
-    else
-      val parent = abs.getParent
-      val name = abs.getFileName
-      if parent != null && name != null then realPathOfNearestAncestor(parent).resolve(name)
-      else abs
 
   protected final def requireNotClassified(p: Path, op: String): Unit =
     if isClassifiedPath(p) then
@@ -170,6 +160,15 @@ abstract class BaseFileSystem extends FileSystem:
     * [[InterfaceImpl]]. Enforced on `FileEntry.writeClassified` so the
     * entry-level path cannot bypass the interface-level gate. */
   protected def classifiedWriteEnabled: Boolean = true
+
+  /** Whether the scope was requested with `FileAccess.ReadOnly`. */
+  protected def readOnly: Boolean = false
+
+  protected final def requireWritable(op: String): Unit =
+    if readOnly then
+      throw SecurityException(
+        s"Access denied: '$op' needs write access, but this file system was requested with FileAccess.ReadOnly."
+      )
 
   protected final def requireClassifiedWritable(p: Path, op: String): Unit =
     requireClassified(p, op)

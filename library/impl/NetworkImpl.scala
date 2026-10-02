@@ -7,12 +7,21 @@ package tacit.library
  *  The allowlist is constructed by [[InterfaceImpl.requestNetwork]] from the
  *  scope's declared `hosts`, after validating those hosts against the
  *  server-configured `networkPermissions` policy. */
-final class NetworkImpl private[library] (val permittedHosts: Set[String]) extends Network:
+final class NetworkImpl private[library] (
+  val permittedHosts: Set[String],
+  val access: NetworkAccess = NetworkAccess.Send
+) extends Network:
   /** The patterns are agent-declared, so they are compiled once per scope and
    *  kept here rather than in the shared [[GlobMatcher]] cache; otherwise agent
    *  code could grow that process-wide cache without bound by declaring
    *  ever-new hosts. */
   private val matchers = permittedHosts.toList.map(GlobMatcher.compile)
+
+  private[library] def requireSend(method: String): Unit =
+    if access == NetworkAccess.Fetch then
+      throw SecurityException(
+        s"Access denied: a $method request or a request body needs NetworkAccess.Send, but this scope was requested with NetworkAccess.Fetch."
+      )
 
   def validateHost(host: String): Unit =
     if !matchers.exists(_.matcher(host).matches()) then

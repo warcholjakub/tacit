@@ -9,7 +9,11 @@ package tacit.library
 final class ProcessPermissionImpl private[library] (
   val allowedCommands: Set[String],
   val strictMode: Boolean = false,
-  val commandPermissions: Option[Set[String]] = None
+  val commandPermissions: Option[Set[String]] = None,
+  /** Commands the host's permission oracle granted, with any arguments. Kept
+   *  apart from the `commandPermissions` globs so a granted name is matched
+   *  exactly and never read as a pattern. */
+  val grantedCommands: Set[String] = Set.empty
 ) extends ProcessPermission:
 
   def validateCommand(command: String, args: List[String] = List.empty): Unit =
@@ -18,6 +22,7 @@ final class ProcessPermissionImpl private[library] (
         s"Access denied: command '$command' is not in allowed commands $allowedCommands"
       )
     commandPermissions match
+      case Some(_) if grantedCommands.contains(command) => ()
       case Some(patterns) =>
         val invocation = if args.isEmpty then command else s"$command ${args.mkString(" ")}"
         if !patterns.exists(p => GlobMatcher.matches(invocation, p)) then
