@@ -348,6 +348,7 @@ Configuration is split into **server config** (transport, recording, sessions) a
 | `--network-permissions <patterns>` | Comma-separated glob patterns of reachable hosts (e.g. `*.example.com,api.github.com`). Only `*` is interpreted as a wildcard. |
 | `--allowed-roots <paths>` | Comma-separated outer bound on `requestFileSystem` roots (e.g. `/home/me/project,/tmp`). A requested root must resolve to a path within one of these. Defaults to the server's working directory when unset. |
 | `--classified-paths <patterns>` | Comma-separated classified path patterns (gitignore-style, see below) |
+| `--read-only-paths <patterns>` | Comma-separated patterns of paths the agent may read but not change (same syntax as classified paths, matched case-insensitively) |
 | `--llm-base-url <url>` | LLM API base URL |
 | `--llm-api-key <key>` | LLM API key |
 | `--llm-model <name>` | LLM model name |
@@ -369,6 +370,7 @@ Configuration is split into **server config** (transport, recording, sessions) a
     "classifiedPaths": [".ssh", ".env", ".env.*", "secrets"],
     "secureOutput": "/tmp/secure.log",
     "classifiedWrite": false,
+    "readOnlyPaths": ["/home/user/project/plugins", "/home/user/project/config.json"],
     "llm": {
       "baseUrl": "https://api.example.com",
       "apiKey": "sk-...",
@@ -433,7 +435,21 @@ Note that because `classify` can wrap any value, leaving this enabled means an
 agent can *overwrite* classified files (e.g. `.ssh/authorized_keys`) with
 arbitrary content: the `Classified` mechanism protects confidentiality, not
 integrity. Set this to `false` in deployments where classified files must be
-read-only for the agent.
+read-only for the agent, or use `readOnlyPaths` to protect only some paths.
+
+**`readOnlyPaths`** (optional, default none). Patterns, in the same syntax as
+classified paths, of files and directories the agent may read but never change:
+`write`, `append`, `delete`, `mkdir` and `writeClassified` are refused on a
+matching path and on anything under it. Use it for files the host trusts and
+that live inside an allowed root, such as plugin folders or configuration the
+agent must not rewrite. A path classified as well stays unreadable in plain
+form; `readOnlyPaths` adds integrity, `classifiedPaths` confidentiality.
+Paths are resolved through symlinks before matching, so a link into a
+read-only directory is refused too. Unlike classified paths, read-only patterns
+match case-insensitively: on case-insensitive file systems (macOS, Windows) a
+path that does not exist yet could otherwise be created in another case
+(`PLUGINS/x.jar` for a `plugins` pattern) and later be read back as the
+protected one. On case-sensitive file systems this only refuses more.
 
 ### Classified Path Patterns
 

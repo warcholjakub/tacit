@@ -24,6 +24,11 @@ class LibraryConfigSuite extends munit.FunSuite:
     val cfg = LibraryConfig.fromJson("""{"classifiedPaths": ["/a", "/b"]}""")
     assertEquals(cfg.classifiedPaths, Some(Set("/a", "/b")))
 
+  test("parses readOnlyPaths, absent by default"):
+    val cfg = LibraryConfig.fromJson("""{"readOnlyPaths": ["/w/plugins", "claw.json"]}""")
+    assertEquals(cfg.readOnlyPaths, Some(Set("/w/plugins", "claw.json")))
+    assertEquals(LibraryConfig.fromJson("{}").readOnlyPaths, None)
+
   test("parses llm"):
     val cfg = LibraryConfig.fromJson("""{
       "llm": { "baseUrl": "https://api.example.com", "apiKey": "sk-test", "model": "m1" }

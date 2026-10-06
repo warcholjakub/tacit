@@ -151,6 +151,9 @@ object Config:
       opt[String]("classified-paths")
         .action((x, c) => c.withLibrary("classifiedPaths", x.split(",").map(_.trim).filter(_.nonEmpty).toSeq.asJson))
         .text("Comma-separated classified path patterns ('.ssh' matches any .ssh dir, '/abs/path' matches that path)."),
+      opt[String]("read-only-paths")
+        .action((x, c) => c.withLibrary("readOnlyPaths", x.split(",").map(_.trim).filter(_.nonEmpty).toSeq.asJson))
+        .text("Comma-separated path patterns the agent may read but not change, same syntax as --classified-paths (matched case-insensitively)."),
       opt[String]("allowed-roots")
         .action((x, c) => c.withLibrary("allowedRoots", x.split(",").map(_.trim).filter(_.nonEmpty).toSeq.asJson))
         .text("Comma-separated outer bound on requestFileSystem roots (e.g. '/home/me/project'). When set, roots outside these are denied."),

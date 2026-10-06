@@ -38,6 +38,10 @@ abstract class InterfaceImpl private[library] (
    *  (e.g. `.ssh/authorized_keys`) against agent writes — confidentiality is
    *  already enforced by the classified-read path. */
   private val classifiedWriteEnabled: Boolean = config.classifiedWrite.getOrElse(true)
+  /** Paths the agent may read but never change (see [[BaseFileSystem.isReadOnlyPath]]).
+   *  Unlike `classifiedWrite = false`, this protects the integrity of chosen
+   *  paths, classified or not, without disabling classified writes elsewhere. */
+  private val readOnlyPatterns: Set[String] = config.readOnlyPaths.getOrElse(Set.empty)
 
   /** Optional secondary sink that receives the *unmasked* form of printed values.
    *  When configured, `println`/`print`/`printf` still write a masked view
@@ -63,7 +67,7 @@ abstract class InterfaceImpl private[library] (
 
   /** Builds the `FileSystem` for one `requestFileSystem` scope. Real disk by
    *  default; tests override it with a [[VirtualFileSystem]]. The
-   *  `classifiedWrite` gate is passed explicitly so an override cannot
+   *  `classifiedWrite` gate and the read-only patterns are passed explicitly so an override cannot
    *  silently drop it (the entry-level `writeClassified`/`mkdir` checks live
    *  in the file system, not here).
    *
@@ -74,9 +78,10 @@ abstract class InterfaceImpl private[library] (
     filter: String -> Boolean,
     classifiedPatterns: Set[String],
     classifiedWrite: Boolean,
-    readOnly: Boolean
+    readOnly: Boolean,
+    readOnlyPatterns: Set[String]
   ): FileSystem =
-    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly)
+    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly, readOnlyPatterns)
 
   export FileOps.*
   export ProcessOps.*
@@ -150,7 +155,8 @@ abstract class InterfaceImpl private[library] (
     val checkedRoot = requireRootAllowed(root, access, reason)
     val fs = createFS(
       checkedRoot.toString, _ => true, classifiedPatterns, classifiedWriteEnabled,
-      readOnly = access == FileAccess.ReadOnly
+      readOnly = access == FileAccess.ReadOnly,
+      readOnlyPatterns = readOnlyPatterns
     )
     op(using fs)
 

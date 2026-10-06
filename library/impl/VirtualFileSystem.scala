@@ -13,7 +13,8 @@ class VirtualFileSystem private[library] (
   initialFiles: Map[String, String] = Map.empty,
   protected val classifiedPatterns: Set[String] = Set.empty,
   classifiedWrite: Boolean = true,
-  protected override val readOnly: Boolean = false
+  protected override val readOnly: Boolean = false,
+  protected override val readOnlyPatterns: Set[String] = Set.empty
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
   protected val normalizedRoot: Path = Paths.get(root).toAbsolutePath.normalize
@@ -55,12 +56,14 @@ class VirtualFileSystem private[library] (
 
     def write(content: String): Unit =
       requireWritable("write")
+      requireNotReadOnly(resolved, "write")
       requireNotClassified(resolved, "write")
       ensureParentDirs(resolved)
       files(resolved) = content.getBytes(StandardCharsets.UTF_8)
 
     def append(content: String): Unit =
       requireWritable("append")
+      requireNotReadOnly(resolved, "append")
       requireNotClassified(resolved, "append")
       ensureParentDirs(resolved)
       files.updateWith(resolved):
@@ -81,6 +84,7 @@ class VirtualFileSystem private[library] (
 
     def delete(): Unit =
       requireWritable("delete")
+      requireNotReadOnly(resolved, "delete")
       requireNotClassified(resolved, "delete")
       if !files.contains(resolved) then
         throw java.nio.file.NoSuchFileException(resolved.toString)
@@ -89,6 +93,7 @@ class VirtualFileSystem private[library] (
 
     def mkdir(): Unit =
       requireWritable("mkdir")
+      requireNotReadOnly(resolved, "mkdir")
       requireCreatable(resolved, "mkdir")
       ensureParentDirs(resolved)
       directories(resolved) = ()
@@ -129,6 +134,7 @@ class VirtualFileSystem private[library] (
 
     def writeClassified(content: Classified[String]): Unit =
       requireWritable("writeClassified")
+      requireNotReadOnly(resolved, "writeClassified")
       requireClassifiedWritable(resolved, "writeClassified")
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>

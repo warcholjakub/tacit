@@ -20,7 +20,8 @@ class RealFileSystem private[library] (
   check: String -> Boolean = _ => true,
   protected val classifiedPatterns: Set[String] = Set.empty,
   classifiedWrite: Boolean = true,
-  protected override val readOnly: Boolean = false
+  protected override val readOnly: Boolean = false,
+  protected override val readOnlyPatterns: Set[String] = Set.empty
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
   protected val normalizedRoot: Path =
@@ -108,6 +109,7 @@ class RealFileSystem private[library] (
     def write(content: String): Unit =
       requireWritable("write")
       val p = revalidate()
+      requireNotReadOnly(p, "write")
       requireNotClassified(p, "write")
       Files.createDirectories(p.getParent)
       Files.write(p, content.getBytes(StandardCharsets.UTF_8))
@@ -116,6 +118,7 @@ class RealFileSystem private[library] (
     def append(content: String): Unit =
       requireWritable("append")
       val p = revalidate()
+      requireNotReadOnly(p, "append")
       requireNotClassified(p, "append")
       Files.createDirectories(p.getParent)
       Files.write(p, content.getBytes(StandardCharsets.UTF_8),
@@ -144,12 +147,14 @@ class RealFileSystem private[library] (
     def delete(): Unit =
       requireWritable("delete")
       val p = revalidate()
+      requireNotReadOnly(p, "delete")
       requireNotClassified(p, "delete")
       Files.delete(p)
 
     def mkdir(): Unit =
       requireWritable("mkdir")
       val p = revalidate()
+      requireNotReadOnly(p, "mkdir")
       requireCreatable(p, "mkdir")
       Files.createDirectories(p)
       ()
@@ -194,6 +199,7 @@ class RealFileSystem private[library] (
     def writeClassified(content: Classified[String]): Unit =
       requireWritable("writeClassified")
       val p = revalidate()
+      requireNotReadOnly(p, "writeClassified")
       requireClassifiedWritable(p, "writeClassified")
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>
