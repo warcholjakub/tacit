@@ -154,6 +154,9 @@ object Config:
       opt[String]("read-only-paths")
         .action((x, c) => c.withLibrary("readOnlyPaths", x.split(",").map(_.trim).filter(_.nonEmpty).toSeq.asJson))
         .text("Comma-separated path patterns the agent may read but not change, same syntax as --classified-paths (matched case-insensitively)."),
+      opt[String]("working-dir")
+        .action((x, c) => c.withLibrary("workingDir", x.asJson))
+        .text("Directory relative paths in agent code resolve against: file-system roots, paths inside them, and where commands run. Defaults to the server's working directory, and is the default for --allowed-roots."),
       opt[String]("allowed-roots")
         .action((x, c) => c.withLibrary("allowedRoots", x.split(",").map(_.trim).filter(_.nonEmpty).toSeq.asJson))
         .text("Comma-separated outer bound on requestFileSystem roots (e.g. '/home/me/project'). When set, roots outside these are denied."),

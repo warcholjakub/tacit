@@ -57,7 +57,10 @@ object ProcessOps:
   )(using pp: ProcessPermission): ProcessResult =
     pp.validateCommand(command, args)
     val pb = ProcessBuilder((command :: args).asJava)
-    workingDir.foreach(d => pb.directory(java.io.File(d)))
+    val base = pp match
+      case impl: ProcessPermissionImpl => java.nio.file.Paths.get(impl.workingDir).nn
+      case _ => java.nio.file.Paths.get(InterfaceImpl.currentWorkingDir).nn
+    pb.directory(base.resolve(workingDir.getOrElse(".")).nn.normalize.nn.toFile)
     val process = pb.start().nn
     try
       // Drain stdout and stderr on separate threads to avoid deadlock

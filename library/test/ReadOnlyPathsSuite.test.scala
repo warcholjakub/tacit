@@ -31,8 +31,8 @@ class ReadOnlyPathsSuite extends munit.FunSuite:
     val config =
       s"""{"allowedRoots": ["/"], "readOnlyPaths": ${json(readOnly)}, "classifiedPaths": ${json(classified)}}"""
     val interface: Interface^ = new InterfaceImpl(config) {
-      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean, readOnlyPatterns: Set[String]): FileSystem =
-        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly, readOnlyPatterns)
+      override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean, readOnlyPatterns: Set[String], workingDir: String): FileSystem =
+        new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly, readOnlyPatterns, workingDir)
     }
     op(interface)
 

@@ -23,13 +23,19 @@ abstract class InterfaceImpl private[library] (
   )
   private val strictMode: Boolean = config.strictMode.getOrElse(true)
   private val classifiedPatterns: Set[String] = config.classifiedPaths.getOrElse(DefaultClassifiedPatterns)
+  /** Base for every relative path agent code passes: file-system roots,
+   *  paths inside a file system, and the directory commands run in. Defaults
+   *  to the server's current working directory; a host that serves another
+   *  directory sets it, since the JVM's own working directory cannot change. */
+  private val workingDir: Path =
+    Paths.get(config.workingDir.getOrElse(InterfaceImpl.currentWorkingDir)).nn.toAbsolutePath.nn.normalize.nn
   /** Outer bound on file-system roots: every `requestFileSystem(root)` must
    *  resolve to a path within one of these. When unset, it defaults to the
-   *  server's current working directory, so the sandbox is confined to that
-   *  subtree by default (fail closed) rather than allowing any root. Set it
-   *  explicitly to widen or relocate the bound. */
+   *  working directory, so the sandbox is confined to that subtree by
+   *  default (fail closed) rather than allowing any root. Set it explicitly
+   *  to widen or relocate the bound. */
   private val allowedRoots: Set[String] =
-    config.allowedRoots.getOrElse(Set(InterfaceImpl.currentWorkingDir))
+    config.allowedRoots.getOrElse(Set(workingDir.toString))
   private val commandPermissions: Option[Set[String]] = config.commandPermissions
   private val networkPermissions: Option[Set[String]] = config.networkPermissions
   private val llmConfig: Option[LlmConfig] = config.llm
@@ -79,9 +85,10 @@ abstract class InterfaceImpl private[library] (
     classifiedPatterns: Set[String],
     classifiedWrite: Boolean,
     readOnly: Boolean,
-    readOnlyPatterns: Set[String]
+    readOnlyPatterns: Set[String],
+    workingDir: String
   ): FileSystem =
-    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly, readOnlyPatterns)
+    new RealFileSystem(root, filter, classifiedPatterns, classifiedWrite, readOnly, readOnlyPatterns, workingDir)
 
   export FileOps.*
   export ProcessOps.*
@@ -112,13 +119,14 @@ abstract class InterfaceImpl private[library] (
     withSecureOut(scala.Predef.printf(fmt, args.map(unwrapForSecure)*))
 
   /** Resolves a path to the canonical form used by the bound check below and
-   *  sent to the permission oracle: absolute + normalized, then through
+   *  sent to the permission oracle: absolute (against the working directory)
+   *  and normalized, then through
    *  symlinks. Resolving symlinks matters for the bound check. Otherwise a
    *  symlink *named* inside an allowed root but *pointing* outside it would
    *  pass. A path that does not exist yet is resolved through its longest
    *  existing ancestor, so it keeps the same form once it is created. */
   private def resolveRootForBound(p: String): Path =
-    InterfaceImpl.canonical(Paths.get(p).toAbsolutePath.nn.normalize.nn)
+    InterfaceImpl.canonical(workingDir.resolve(p).nn.normalize.nn)
 
   /** Entry-time outer-bound check for [[requestFileSystem]]: the requested root
    *  must resolve to a path equal to, or nested under, one of `allowedRoots`
@@ -156,7 +164,8 @@ abstract class InterfaceImpl private[library] (
     val fs = createFS(
       checkedRoot.toString, _ => true, classifiedPatterns, classifiedWriteEnabled,
       readOnly = access == FileAccess.ReadOnly,
-      readOnlyPatterns = readOnlyPatterns
+      readOnlyPatterns = readOnlyPatterns,
+      workingDir = workingDir.toString
     )
     op(using fs)
 
@@ -206,7 +215,7 @@ abstract class InterfaceImpl private[library] (
       commands, commandPermissions, "exec", "command",
       "reason" -> io.circe.Json.fromString(reason)
     )
-    val perm = new ProcessPermissionImpl(commands, strictMode, commandPermissions, granted)
+    val perm = new ProcessPermissionImpl(commands, strictMode, commandPermissions, granted, workingDir.toString)
     op(using perm)
 
   def requestNetwork[T](
@@ -295,8 +304,8 @@ object InterfaceImpl:
         case Some(parent) => canonical(parent).resolve(path.getFileName.nn).nn
         case None => path
 
-  /** The server process's current working directory, used as the default
-    * `allowedRoots` bound. Falls back to "." if the `user.dir` property is
+  /** The server process's current working directory, the default
+    * `workingDir`. Falls back to "." if the `user.dir` property is
     * absent (it normally is not). */
   private[library] def currentWorkingDir: String =
     Option(System.getProperty("user.dir")).getOrElse(".")

@@ -12,7 +12,8 @@ case class LibraryConfig(
   llm: Option[LlmConfig] = None,
   secureOutput: Option[String] = None,
   classifiedWrite: Option[Boolean] = None,
-  readOnlyPaths: Option[Set[String]] = None
+  readOnlyPaths: Option[Set[String]] = None,
+  workingDir: Option[String] = None
 ) derives Decoder
 
 object LibraryConfig:

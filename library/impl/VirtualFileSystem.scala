@@ -14,10 +14,13 @@ class VirtualFileSystem private[library] (
   protected val classifiedPatterns: Set[String] = Set.empty,
   classifiedWrite: Boolean = true,
   protected override val readOnly: Boolean = false,
-  protected override val readOnlyPatterns: Set[String] = Set.empty
+  protected override val readOnlyPatterns: Set[String] = Set.empty,
+  /** What relative paths are resolved against. */
+  workingDir: String = InterfaceImpl.currentWorkingDir
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
-  protected val normalizedRoot: Path = Paths.get(root).toAbsolutePath.normalize
+  private val base: Path = Paths.get(workingDir).toAbsolutePath.normalize
+  protected val normalizedRoot: Path = base.resolve(root).normalize
   protected def pathCheck(relativePath: String): Boolean = check(relativePath)
   private val files: TrieMap[Path, Array[Byte]] = TrieMap.empty
   private val directories: TrieMap[Path, Unit] = TrieMap(normalizedRoot -> ())
@@ -34,7 +37,7 @@ class VirtualFileSystem private[library] (
       parent = parent.getParent
 
   private def resolvePath(target: String): Path =
-    val resolved = Paths.get(target).toAbsolutePath.normalize
+    val resolved = base.resolve(target).normalize
     if !resolved.startsWith(normalizedRoot) then
       throw SecurityException(
         s"Access denied: $resolved is outside virtual root $normalizedRoot"

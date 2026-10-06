@@ -11,8 +11,8 @@ class VirtualEnvSuite extends munit.FunSuite:
   // allowedRoots "/" opts out of the default working-directory bound; these
   // tests exercise file operations on a virtual root, not the bound itself.
   val interface: Interface^{} = new InterfaceImpl("""{"allowedRoots": ["/"]}""") {
-    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean, readOnlyPatterns: Set[String]): FileSystem =
-      new VirtualFileSystem(root, filter, classifiedPatterns = classifiedPatterns, classifiedWrite = classifiedWrite, readOnly = readOnly, readOnlyPatterns = readOnlyPatterns)
+    override def createFS(root: String, filter: String -> Boolean, classifiedPatterns: Set[String], classifiedWrite: Boolean, readOnly: Boolean, readOnlyPatterns: Set[String], workingDir: String): FileSystem =
+      new VirtualFileSystem(root, filter, classifiedPatterns = classifiedPatterns, classifiedWrite = classifiedWrite, readOnly = readOnly, readOnlyPatterns = readOnlyPatterns, workingDir = workingDir)
   }.unsafeAssumePure
 
   import interface.*

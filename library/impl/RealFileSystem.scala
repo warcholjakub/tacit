@@ -21,11 +21,14 @@ class RealFileSystem private[library] (
   protected val classifiedPatterns: Set[String] = Set.empty,
   classifiedWrite: Boolean = true,
   protected override val readOnly: Boolean = false,
-  protected override val readOnlyPatterns: Set[String] = Set.empty
+  protected override val readOnlyPatterns: Set[String] = Set.empty,
+  /** What relative paths are resolved against. */
+  workingDir: String = InterfaceImpl.currentWorkingDir
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
+  private val base: Path = Paths.get(workingDir).toAbsolutePath.normalize
   protected val normalizedRoot: Path =
-    InterfaceImpl.canonical(Paths.get(root).toAbsolutePath.normalize)
+    InterfaceImpl.canonical(base.resolve(root).normalize)
   protected def pathCheck(relativePath: String): Boolean = check(relativePath)
 
   /** Resolves symlinks in a path. For existing paths, uses `toRealPath()`.
@@ -70,7 +73,7 @@ class RealFileSystem private[library] (
 
   /** Resolves and validates that a path is within the allowed root. */
   private def resolvePath(target: String): Path =
-    resolveAndCheck(Paths.get(target).toAbsolutePath.normalize)
+    resolveAndCheck(base.resolve(target).normalize)
 
   /** Whether `absPath` (an entry found while listing or walking a directory)
     * resolves to a location inside the root. Entries that do not, e.g. a
