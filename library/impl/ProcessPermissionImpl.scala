@@ -13,7 +13,10 @@ final class ProcessPermissionImpl private[library] (
   /** Commands the host's permission oracle granted, with any arguments. Kept
    *  apart from the `commandPermissions` globs so a granted name is matched
    *  exactly and never read as a pattern. */
-  val grantedCommands: Set[String] = Set.empty
+  val grantedCommands: Set[String] = Set.empty,
+  /** Where commands run unless `exec` names a directory, and what a
+   *  relative directory passed to `exec` is resolved against. */
+  val workingDir: String = InterfaceImpl.currentWorkingDir
 ) extends ProcessPermission:
 
   def validateCommand(command: String, args: List[String] = List.empty): Unit =

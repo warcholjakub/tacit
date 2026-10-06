@@ -20,11 +20,15 @@ class RealFileSystem private[library] (
   check: String -> Boolean = _ => true,
   protected val classifiedPatterns: Set[String] = Set.empty,
   classifiedWrite: Boolean = true,
-  protected override val readOnly: Boolean = false
+  protected override val readOnly: Boolean = false,
+  protected override val readOnlyPatterns: Set[String] = Set.empty,
+  /** What relative paths are resolved against. */
+  workingDir: String = InterfaceImpl.currentWorkingDir
 ) extends BaseFileSystem:
   protected override val classifiedWriteEnabled: Boolean = classifiedWrite
+  private val base: Path = Paths.get(workingDir).toAbsolutePath.normalize
   protected val normalizedRoot: Path =
-    InterfaceImpl.canonical(Paths.get(root).toAbsolutePath.normalize)
+    InterfaceImpl.canonical(base.resolve(root).normalize)
   protected def pathCheck(relativePath: String): Boolean = check(relativePath)
 
   /** Resolves symlinks in a path. For existing paths, uses `toRealPath()`.
@@ -69,7 +73,7 @@ class RealFileSystem private[library] (
 
   /** Resolves and validates that a path is within the allowed root. */
   private def resolvePath(target: String): Path =
-    resolveAndCheck(Paths.get(target).toAbsolutePath.normalize)
+    resolveAndCheck(base.resolve(target).normalize)
 
   /** Whether `absPath` (an entry found while listing or walking a directory)
     * resolves to a location inside the root. Entries that do not, e.g. a
@@ -108,6 +112,7 @@ class RealFileSystem private[library] (
     def write(content: String): Unit =
       requireWritable("write")
       val p = revalidate()
+      requireNotReadOnly(p, "write")
       requireNotClassified(p, "write")
       Files.createDirectories(p.getParent)
       Files.write(p, content.getBytes(StandardCharsets.UTF_8))
@@ -116,6 +121,7 @@ class RealFileSystem private[library] (
     def append(content: String): Unit =
       requireWritable("append")
       val p = revalidate()
+      requireNotReadOnly(p, "append")
       requireNotClassified(p, "append")
       Files.createDirectories(p.getParent)
       Files.write(p, content.getBytes(StandardCharsets.UTF_8),
@@ -144,12 +150,14 @@ class RealFileSystem private[library] (
     def delete(): Unit =
       requireWritable("delete")
       val p = revalidate()
+      requireNotReadOnly(p, "delete")
       requireNotClassified(p, "delete")
       Files.delete(p)
 
     def mkdir(): Unit =
       requireWritable("mkdir")
       val p = revalidate()
+      requireNotReadOnly(p, "mkdir")
       requireCreatable(p, "mkdir")
       Files.createDirectories(p)
       ()
@@ -194,6 +202,7 @@ class RealFileSystem private[library] (
     def writeClassified(content: Classified[String]): Unit =
       requireWritable("writeClassified")
       val p = revalidate()
+      requireNotReadOnly(p, "writeClassified")
       requireClassifiedWritable(p, "writeClassified")
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>

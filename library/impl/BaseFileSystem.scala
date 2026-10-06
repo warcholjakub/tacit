@@ -9,6 +9,9 @@ abstract class BaseFileSystem extends FileSystem:
 
   protected def normalizedRoot: Path
   protected def classifiedPatterns: Set[String]
+  /** Paths the agent may read but never change, in the same pattern syntax as
+    * [[classifiedPatterns]]. Empty by default. */
+  protected def readOnlyPatterns: Set[String] = Set.empty
   protected def pathCheck(relativePath: String): Boolean
 
   protected final def checkPath(resolved: Path): Unit =
@@ -33,6 +36,19 @@ abstract class BaseFileSystem extends FileSystem:
   protected final def isClassifiedPath(p: Path): Boolean =
     compiledPatterns.exists(matchesCompiled(_, p))
 
+  /** Whether `p` matches a read-only pattern, or is a descendant of a match.
+    * Same matching as [[isClassifiedPath]], so absolute patterns are resolved
+    * through symlinks and `p` arrives resolved too: a link into a read-only
+    * directory reaches the same real path and is refused the same way.
+    *
+    * Unlike classified patterns, these match case-insensitively. Resolving a
+    * path that does not exist yet keeps the case it was given, so on a
+    * case-insensitive file system (macOS, Windows) `PLUGINS/x.jar` would
+    * otherwise slip past a `plugins` pattern and then be read back as
+    * `plugins/x.jar`. On a case-sensitive one this only refuses more. */
+  protected final def isReadOnlyPath(p: Path): Boolean =
+    compiledReadOnly.exists(matchesCompiled(_, p, foldCase = true))
+
   /** A classified pattern in matchable form. Kept as plain data (not
     * `Path => Boolean` closures) so the cached value carries no captured
     * capabilities. */
@@ -50,7 +66,10 @@ abstract class BaseFileSystem extends FileSystem:
     * `PathMatcher` per pattern per file operation. `lazy` so subclass state
     * (`normalizedRoot`) is initialized before first use; thread-safe. */
   private lazy val compiledPatterns: List[CompiledPattern] =
-    classifiedPatterns.toList.map(compilePattern)
+    classifiedPatterns.toList.map(compilePattern(_))
+
+  private lazy val compiledReadOnly: List[CompiledPattern] =
+    readOnlyPatterns.toList.map(compilePattern(_, foldCase = true))
 
   /** Matchers for absolute patterns, keyed by the symlink-resolved glob. The
     * resolution itself is redone on every check (the file's own path is
@@ -62,38 +81,48 @@ abstract class BaseFileSystem extends FileSystem:
     java.util.concurrent.ConcurrentHashMap[String, List[java.nio.file.PathMatcher]]()
   private val MaxAbsoluteMatchers = 64
 
-  private def compilePattern(pattern: String): CompiledPattern =
+  private def fold(s: String): String = s.toLowerCase(java.util.Locale.ROOT).nn
+  private def fold(p: Path): Path = Path.of(fold(p.toString)).nn
+
+  /** With `foldCase`, the glob is lower-cased here and the path at match
+    * time; an absolute glob only after its prefix is resolved, since the
+    * resolution needs the prefix as written. */
+  private def compilePattern(pattern: String, foldCase: Boolean = false): CompiledPattern =
     val stripped = pattern.stripSuffix("/")
+    val glob = if foldCase then fold(stripped) else stripped
     if stripped.isEmpty then CompiledPattern.Relative(Nil)
     else if !stripped.contains("/") then
       // No slash: match against each path component individually
-      CompiledPattern.Component(FileSystems.getDefault.nn.getPathMatcher(s"glob:$stripped"))
+      CompiledPattern.Component(FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob"))
     else if Path.of(stripped).isAbsolute then
       CompiledPattern.Absolute(stripped)
     else
       // Relative pattern: match against path relative to root
-      CompiledPattern.Relative(globOrDescendantMatchers(stripped))
+      CompiledPattern.Relative(globOrDescendantMatchers(glob))
 
-  private def matchesCompiled(compiled: CompiledPattern, p: Path): Boolean =
+  private def matchesCompiled(compiled: CompiledPattern, p: Path, foldCase: Boolean = false): Boolean =
+    def folded(q: Path): Path = if foldCase then fold(q) else q
     compiled match
       case CompiledPattern.Component(matcher) =>
-        val count = p.getNameCount
+        val q = folded(p)
+        val count = q.getNameCount
         var i = 0
         var found = false
         while i < count && !found do
-          if matcher.matches(p.getName(i)) then found = true
+          if matcher.matches(q.getName(i)) then found = true
           i += 1
         found
       case CompiledPattern.Absolute(glob) =>
         // Absolute pattern: resolve non-glob prefix through symlinks, then glob-match
         val resolved = resolveGlobPrefix(glob)
+        val key = if foldCase then fold(resolved) else resolved
         // Bounded: a prefix that keeps being re-pointed would otherwise
         // accumulate one entry per resolution.
         if absoluteMatchers.size > MaxAbsoluteMatchers then absoluteMatchers.clear()
-        val matchers = absoluteMatchers.computeIfAbsent(resolved, g => globOrDescendantMatchers(g)).nn
-        matchers.exists(_.matches(p))
+        val matchers = absoluteMatchers.computeIfAbsent(key, g => globOrDescendantMatchers(g)).nn
+        matchers.exists(_.matches(folded(p)))
       case CompiledPattern.Relative(matchers) =>
-        matchers.exists(_.matches(normalizedRoot.relativize(p)))
+        matchers.exists(_.matches(folded(normalizedRoot.relativize(p))))
 
   /** Precompiled matchers accepting a `glob` exactly or any descendant of a
     * match. For globs starting with `**​/`, leading-`**​/` stripped variants are
@@ -147,6 +176,16 @@ abstract class BaseFileSystem extends FileSystem:
     if isClassifiedPath(p) then
       throw SecurityException(
         s"Access denied: '$op' is not allowed on classified path $p. Use classified operations instead."
+      )
+
+  /** Gate for every operation that changes `p`: `write`, `append`, `delete`,
+    * `mkdir` and `writeClassified`. Unlike `classifiedWrite = false`, which
+    * only stops classified writes and does so everywhere, this stops all
+    * writes, and only under the configured paths. */
+  protected final def requireNotReadOnly(p: Path, op: String): Unit =
+    if isReadOnlyPath(p) then
+      throw SecurityException(
+        s"Access denied: '$op' is not allowed on read-only path $p"
       )
 
   protected final def requireClassified(p: Path, op: String): Unit =
