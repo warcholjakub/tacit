@@ -29,6 +29,14 @@ object ManagedRepl:
     * can tell the output was cut rather than complete. */
   val TruncationMarker: String = "\n... [output truncated: exceeded 10 MiB capture limit]"
 
+  /** How long a timed-out evaluation gets to stop after being interrupted
+    * before the session treats it as still running. */
+  private val InterruptGraceMs: Long = 200
+
+  val StillRunningMessage: String =
+    "An earlier execution in this session timed out and is still running in the background; " +
+      "this session cannot run code until it ends. Start a new session to continue."
+
   /** An [[java.io.OutputStream]] that retains at most `limit` bytes and
     * silently discards the rest, setting [[truncated]] once anything is
     * dropped. Writes never throw, so the cap logic can never break the
@@ -58,12 +66,18 @@ object ManagedRepl:
   /** Subclass of [[ReplDriver]] that exposes the protected `runBody`/`interpret`
     * pair, so we can feed a pre-parsed [[ParseResult]] to the driver instead of
     * re-parsing the same source inside `driver.run(String)`.
+    *
+    * `redirectOutput` is off: the driver would otherwise swap the
+    * process-wide `System.out`/`System.err` around every run, which breaks as
+    * soon as two sessions run at once. Diagnostics and rendered values go to
+    * `out` either way; [[RoutingPrintStream]] catches the rest.
     */
   private class OpenReplDriver(
       settings: Array[String],
       out: PrintStream,
       cl: Option[ClassLoader]
   ) extends ReplDriver(settings, out, cl):
+    override def redirectOutput: Boolean = false
     def runParseResult(res: ParseResult)(using State): State =
       runBody(interpret(res))
 
@@ -187,41 +201,65 @@ object ManagedRepl:
         Option.when(includeCore)(corePreamble).toList ++ plugins.map(_.preamble)
       parts.mkString("\n")
 
-  /** We swap `System.out`/`System.err` around each execution to catch output the
-   *  REPL driver doesn't route through `printStream` (notably compiler
-   *  diagnostics under capture checking). Because those streams are
-   *  process-global, concurrent executions would clobber each other's capture —
-   *  this lock serializes them. It bounds session concurrency to 1; that's the
-   *  cost of using the shared compiler output as our signal.
-   */
-  private val outputCaptureLock = Object()
+  /** Where the execution running on this thread captures its output. */
+  private val captureTarget = ThreadLocal[PrintStream]()
+
+  /** Installed once as `System.out` and `System.err`: each write goes to the
+    * capture of the execution running on the writing thread, or to the
+    * stream it replaced when none is. Agent `println` lands here because
+    * every session loads its own `scala.Console` (the library JAR bundles the
+    * standard library), and `Console.out` is whatever `System.out` was when
+    * it was first initialized. Sessions can therefore run in parallel without
+    * swapping process-wide streams.
+    */
+  private[executor] final class RoutingPrintStream(fallback: PrintStream)
+      extends PrintStream(
+        new java.io.OutputStream:
+          private def target: PrintStream =
+            val t = captureTarget.get()
+            if t == null then fallback else t
+          override def write(b: Int): Unit = target.write(b)
+          override def write(b: Array[Byte], off: Int, len: Int): Unit = target.write(b, off, len)
+          override def flush(): Unit = target.flush()
+        ,
+        true,
+        StandardCharsets.UTF_8
+      )
+
+  /** Puts [[RoutingPrintStream]] in place before a session loads its
+    * `scala.Console`. Checked for every new session, so a host that replaced
+    * `System.out` after the first one (e.g. to keep it off a JSON-RPC
+    * channel) gets routing again on top of its stream. */
+  private def routeStandardStreams(): Unit = synchronized:
+    System.out match
+      case _: RoutingPrintStream => ()
+      case out                   => System.setOut(RoutingPrintStream(out))
+    System.err match
+      case _: RoutingPrintStream => ()
+      case err                   => System.setErr(RoutingPrintStream(err))
 
   private def withOutputCapture(
     outputCapture: BoundedOutputStream,
     printStream: PrintStream
   )(run: => Unit): (String, Option[Throwable]) =
-    outputCaptureLock.synchronized:
-      outputCapture.resetCapture()
-      val oldOut = System.out
-      val oldErr = System.err
-      System.setOut(printStream)
-      System.setErr(printStream)
-      val thrown =
-        try
-          run
-          None
-        // NonFatal (not just Exception) so a non-fatal interpreter *Error* — e.g.
-        // dotty's `AssertionError: denotation ... invalid in run N` on certain
-        // symbols is reported as a failed execution instead of escaping to the
-        // JSON-RPC loop, where it would leave the client without any response.
-        catch case scala.util.control.NonFatal(e) => Option(e)
-        finally
-          System.setOut(oldOut)
-          System.setErr(oldErr)
-          printStream.flush()
-      val captured = outputCapture.capturedString.trim
-      val output = if outputCapture.truncated then captured + TruncationMarker else captured
-      (output, thrown)
+    outputCapture.resetCapture()
+    val previous = captureTarget.get()
+    captureTarget.set(printStream)
+    val thrown =
+      try
+        run
+        None
+      // NonFatal (not just Exception) so a non-fatal interpreter *Error* — e.g.
+      // dotty's `AssertionError: denotation ... invalid in run N` on certain
+      // symbols is reported as a failed execution instead of escaping to the
+      // JSON-RPC loop, where it would leave the client without any response.
+      catch case scala.util.control.NonFatal(e) => Option(e)
+      finally
+        captureTarget.set(previous)
+        printStream.flush()
+    val captured = outputCapture.capturedString.trim
+    val output = if outputCapture.truncated then captured + TruncationMarker else captured
+    (output, thrown)
 end ManagedRepl
 
 /** Wraps a [[ReplDriver]] together with its output-capture streams and
@@ -230,6 +268,13 @@ end ManagedRepl
   */
 class ManagedRepl(using Context):
   import ManagedRepl.*
+
+  routeStandardStreams()
+
+  /** A timed-out evaluation that ignored its interrupt and still runs
+    * against [[driver]]. The driver is not thread-safe, so the session
+    * refuses to run anything until that thread ends. */
+  @volatile private var abandoned: Option[Thread] = None
 
   private val outputCapture = new BoundedOutputStream(MaxOutputBytes)
   private val printStream = new PrintStream(outputCapture, true, StandardCharsets.UTF_8)
@@ -254,10 +299,15 @@ class ManagedRepl(using Context):
     * REPL meta-commands outside the `:type`/`:doc`/`:imports` allowlist
     * (blocking `:load`, `:sh`, `:quit`, ...), parse exactly once, and read
     * compile-error state structurally instead of scraping stdout.
+    *
+    * Executions in one session run one at a time; different sessions run in
+    * parallel.
     */
-  def run(code: String): ExecutionResult =
+  def run(code: String): ExecutionResult = synchronized:
     val violations = CodeValidator.validate(code)
-    if violations.nonEmpty then
+    if abandoned.exists(_.isAlive) then
+      ExecutionResult(false, "", Some(StillRunningMessage))
+    else if violations.nonEmpty then
       ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
     else
       ParseResult(terminated(code))(using state) match
@@ -332,9 +382,9 @@ class ManagedRepl(using Context):
     * session keeps its prior state (the abandoned statement has no observable
     * effect). The interrupt is best-effort: blocking I/O and sleeps respond to
     * it, but a CPU-bound loop (in REPL, library or JDK code) keeps
-    * running in the background and continues to hold the process-global
-    * output lock. This is *not* a hard sandbox; true preemption requires
-    * process isolation.
+    * running in the background. Such a thread is kept as [[abandoned]] and
+    * blocks only this session, until it ends. This is *not* a hard sandbox;
+    * true preemption requires process isolation.
     */
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[(State, String, Option[Throwable])]()
@@ -345,7 +395,19 @@ class ManagedRepl(using Context):
     worker.join(limitMs)
     if worker.isAlive then
       worker.interrupt()
-      ExecutionResult(false, "", Some(s"Execution timed out after ${limitMs}ms"))
+      // The abandoned run compiled into the next wrapper object
+      // (`rs$line$N`), whose class may already be loaded. Skip its name, or
+      // the next run would load that class instead of its own.
+      state = state.copy(objectIndex = state.objectIndex + 1)
+      worker.join(InterruptGraceMs)
+      val stillRunning = worker.isAlive
+      if stillRunning then abandoned = Some(worker)
+      val message = s"Execution timed out after ${limitMs}ms" +
+        (if stillRunning then
+           ". It did not stop when interrupted and keeps running in the background; " +
+             "this session cannot run code until it ends."
+         else "")
+      ExecutionResult(false, "", Some(message))
     else
       resultRef.get() match
         case null      => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
