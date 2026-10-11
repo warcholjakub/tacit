@@ -61,6 +61,20 @@ class ClassifiedSuite extends munit.FunSuite:
     assert(ClassifiedImpl.unwrap(result).isFailure)
   }
 
+  test("fatal errors thrown by map, flatMap or wrap stay inside the Classified") {
+    val secret = ClassifiedImpl.wrap("super-secret-password")
+    val thrown: List[String -> Throwable] = List(
+      s => InterruptedException(s"leaked: $s"),
+      s => StackOverflowError(s"leaked: $s"),
+      s => new scala.util.control.ControlThrowable(s"leaked: $s") {}
+    )
+    thrown.foreach { mk =>
+      assert(ClassifiedImpl.unwrap(secret.map(s => throw mk(s))).isFailure)
+      assert(ClassifiedImpl.unwrap(secret.flatMap(s => throw mk(s))).isFailure)
+      assert(ClassifiedImpl.unwrap(ClassifiedImpl.wrap(throw mk("x"))).isFailure)
+    }
+  }
+
   // ── File system classified path enforcement (VirtualFileSystem) ───────
 
   val interface: Interface^{} = new InterfaceImpl(

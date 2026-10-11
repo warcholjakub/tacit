@@ -270,6 +270,27 @@ class LibraryIntegrationSuite extends munit.FunSuite:
       "capture"
     )
 
+  test("Classified.map cannot print through GlobalIOCap passed explicitly"):
+    // The preamble's `given IOCapability` is tracked, so a closure using it is
+    // impure; naming the singleton behind it must not be a way around that.
+    assertCompileError(
+      """
+      val secret = classify("password")
+      secret.map(x => { println(x)(using tacit.library.GlobalIOCap); x })
+      """,
+      "safe code"
+    )
+
+  test("a fatal error thrown inside Classified.map does not reach agent code"):
+    val result = ScalaExecutor.execute(
+      """
+      val secret = classify("password")
+      secret.map(x => throw InterruptedException(s"leaked: $x"))
+      """
+    )
+    assert(result.success, s"execution failed: ${result.error.getOrElse(result.output)}")
+    assert(!result.output.contains("password"), s"leaked: ${result.output}")
+
   test("Classified.map cannot exfiltrate via a captured mutable Array cell"):
     // The secret must not escape the pure map closure by being written into a
     // mutable structure captured from the enclosing scope. Capture checking

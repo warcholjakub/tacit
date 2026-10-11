@@ -333,8 +333,10 @@ class ManagedRepl(using Context):
     * effect). The interrupt is best-effort: blocking I/O and sleeps respond to
     * it, but a CPU-bound loop (in REPL, library or JDK code) keeps
     * running in the background and continues to hold the process-global
-    * output lock. This is *not* a hard sandbox; true preemption requires
-    * process isolation.
+    * output lock. Code inside `Classified.map` does not see the interrupt
+    * either: the library keeps every throwable inside the `Classified`, so an
+    * InterruptedException there is swallowed. This is *not* a hard sandbox;
+    * true preemption requires process isolation.
     */
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[(State, String, Option[Throwable])]()

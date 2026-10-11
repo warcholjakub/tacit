@@ -126,7 +126,9 @@ object WebOps:
       case Success(b) =>
         val outcome: Try[String] =
           try Success(httpPost(url, b, contentType, headers, secretHeaders))
-          catch case scala.util.control.NonFatal(e) => Failure(e)
+          // Every throwable, as in ClassifiedImpl: one that escaped would tell
+          // agent code something about the request made with the secret.
+          catch case e: Throwable => Failure(e)
         ClassifiedImpl.fromTry(outcome)
       // The body already wraps a failed computation; propagate it untouched
       // without making any request.
