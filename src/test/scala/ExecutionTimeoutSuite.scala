@@ -66,12 +66,16 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
     List(
       "Thread(() => ()).start()",
       "Thread.ofVirtual().start(() => ())",
+      "Thread.startVirtualThread(() => ())",
       "java.util.concurrent.Executors.newSingleThreadExecutor()",
       "java.util.concurrent.CompletableFuture.runAsync(() => ())",
-      "scala.concurrent.Future(1)(using scala.concurrent.ExecutionContext.global)"
+      "scala.concurrent.Future(1)(using scala.concurrent.ExecutionContext.global)",
+      "java.util.Timer()"
     ).foreach: code =>
       val r = ScalaExecutor.execute(code)
       assert(!r.success, s"$code was accepted: ${r.output}")
+      // Rejected by safe mode, not by some other compile error.
+      assert(r.output.contains("from safe code"), s"$code failed for another reason: ${r.output}")
 
   test("a run stuck outside REPL code blocks only its own session"):
     val oracle = BlockingOracle()
