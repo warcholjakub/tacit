@@ -1,7 +1,7 @@
 package tacit
 package executor
 
-import core.{ApiMode, Context}
+import core.{ApiMode, Context, Log}
 import Context.*
 
 import dotty.tools.repl.*
@@ -35,7 +35,7 @@ object ManagedRepl:
 
   val StillRunningMessage: String =
     "An earlier execution in this session timed out and is still running in the background; " +
-      "this session cannot run code until it ends. Start a new session to continue."
+      "this session cannot run code until it ends."
 
   /** An [[java.io.OutputStream]] that retains at most `limit` bytes and
     * silently discards the rest, setting [[truncated]] once anything is
@@ -171,6 +171,11 @@ object ManagedRepl:
     val function: java.util.function.Function[String, String] = oracle(_)
     invokeLibrary(loader, "installPermissionOracle", classOf[java.util.function.Function[?, ?]], function)
 
+  /** Makes every capability call from `thread` fail, through the library
+    * loaded by `loader` (see `InterfaceImpl.revoke`). */
+  private def revokeLibraryAccess(loader: ClassLoader, thread: Thread): Unit =
+    invokeLibrary(loader, "revoke", classOf[Thread], thread)
+
   private def invokeLibrary(loader: ClassLoader, method: String, paramType: Class[?], arg: AnyRef): Unit =
     val module = Class.forName("tacit.library.InterfaceImpl$", true, loader)
     val instance = module.getField("MODULE$").get(null)
@@ -211,20 +216,84 @@ object ManagedRepl:
     * standard library), and `Console.out` is whatever `System.out` was when
     * it was first initialized. Sessions can therefore run in parallel without
     * swapping process-wide streams.
+    *
+    * Every method hands the call to the target stream whole, so text is
+    * encoded by the target, never by this shared stream: its encoder would
+    * carry half a surrogate pair from one session's write into the next
+    * session's, and its lock would make sessions wait on each other. Threads
+    * started by agent or library code have no target, so their output goes to
+    * the replaced stream (a host's stderr or terminal), not to a capture.
     */
   private[executor] final class RoutingPrintStream(fallback: PrintStream)
       extends PrintStream(
         new java.io.OutputStream:
-          private def target: PrintStream =
-            val t = captureTarget.get()
-            if t == null then fallback else t
-          override def write(b: Int): Unit = target.write(b)
-          override def write(b: Array[Byte], off: Int, len: Int): Unit = target.write(b, off, len)
-          override def flush(): Unit = target.flush()
+          override def write(b: Int): Unit = currentTarget(fallback).write(b)
+          override def write(b: Array[Byte], off: Int, len: Int): Unit =
+            currentTarget(fallback).write(b, off, len)
+          override def flush(): Unit = currentTarget(fallback).flush()
         ,
         true,
         StandardCharsets.UTF_8
-      )
+      ):
+    private def target: PrintStream = currentTarget(fallback)
+
+    override def write(b: Int): Unit = target.write(b)
+    override def write(buf: Array[Byte], off: Int, len: Int): Unit = target.write(buf, off, len)
+    override def write(buf: Array[Byte]): Unit = target.write(buf)
+    override def writeBytes(buf: Array[Byte]): Unit = target.writeBytes(buf)
+    override def flush(): Unit = target.flush()
+    /** Never closes a target: they belong to sessions and to the host. */
+    override def close(): Unit = target.flush()
+    override def checkError(): Boolean = target.checkError()
+
+    override def print(b: Boolean): Unit = target.print(b)
+    override def print(c: Char): Unit = target.print(c)
+    override def print(i: Int): Unit = target.print(i)
+    override def print(l: Long): Unit = target.print(l)
+    override def print(f: Float): Unit = target.print(f)
+    override def print(d: Double): Unit = target.print(d)
+    override def print(s: Array[Char]): Unit = target.print(s)
+    override def print(s: String | Null): Unit = target.print(s)
+    override def print(obj: Object | Null): Unit = target.print(obj)
+
+    override def println(): Unit = target.println()
+    override def println(x: Boolean): Unit = target.println(x)
+    override def println(x: Char): Unit = target.println(x)
+    override def println(x: Int): Unit = target.println(x)
+    override def println(x: Long): Unit = target.println(x)
+    override def println(x: Float): Unit = target.println(x)
+    override def println(x: Double): Unit = target.println(x)
+    override def println(x: Array[Char]): Unit = target.println(x)
+    override def println(x: String | Null): Unit = target.println(x)
+    override def println(x: Object | Null): Unit = target.println(x)
+
+    override def printf(format: String | Null, args: (Object | Null)*): PrintStream =
+      target.printf(format, args*)
+      this
+    override def printf(l: java.util.Locale | Null, format: String | Null, args: (Object | Null)*): PrintStream =
+      target.printf(l, format, args*)
+      this
+    override def format(format: String | Null, args: (Object | Null)*): PrintStream =
+      target.format(format, args*)
+      this
+    override def format(l: java.util.Locale | Null, format: String | Null, args: (Object | Null)*): PrintStream =
+      target.format(l, format, args*)
+      this
+
+    override def append(csq: CharSequence | Null): PrintStream =
+      target.append(csq)
+      this
+    override def append(csq: CharSequence | Null, start: Int, end: Int): PrintStream =
+      target.append(csq, start, end)
+      this
+    override def append(c: Char): PrintStream =
+      target.append(c)
+      this
+  end RoutingPrintStream
+
+  private def currentTarget(fallback: PrintStream): PrintStream =
+    val t = captureTarget.get()
+    if t == null then fallback else t
 
   /** Puts [[RoutingPrintStream]] in place before a session loads its
     * `scala.Console`. Checked for every new session, so a host that replaced
@@ -255,7 +324,9 @@ object ManagedRepl:
       // JSON-RPC loop, where it would leave the client without any response.
       catch case scala.util.control.NonFatal(e) => Option(e)
       finally
-        captureTarget.set(previous)
+        // remove() rather than set(null): callers may be long-lived pool or
+        // JSON-RPC threads.
+        if previous == null then captureTarget.remove() else captureTarget.set(previous)
         printStream.flush()
     val captured = outputCapture.capturedString.trim
     val output = if outputCapture.truncated then captured + TruncationMarker else captured
@@ -264,9 +335,10 @@ end ManagedRepl
 
 /** Wraps a [[ReplDriver]] together with its output-capture streams and
   * accumulated [[State]]. Call [[init]] once, then [[run]] repeatedly; each
-  * run accumulates into the persistent state.
+  * run accumulates into the persistent state. `name` identifies it in logs
+  * and thread names (a session id).
   */
-class ManagedRepl(using Context):
+class ManagedRepl(name: String = "stateless")(using Context):
   import ManagedRepl.*
 
   routeStandardStreams()
@@ -275,6 +347,11 @@ class ManagedRepl(using Context):
     * against [[driver]]. The driver is not thread-safe, so the session
     * refuses to run anything until that thread ends. */
   @volatile private var abandoned: Option[Thread] = None
+
+  /** Whether a timed-out evaluation is still running, so that [[run]]
+    * refuses code. It keeps this REPL's compiler and class loader in memory
+    * until it ends, which a host should count against its limits. */
+  def blocked: Boolean = abandoned.exists(_.isAlive)
 
   private val outputCapture = new BoundedOutputStream(MaxOutputBytes)
   private val printStream = new PrintStream(outputCapture, true, StandardCharsets.UTF_8)
@@ -301,11 +378,15 @@ class ManagedRepl(using Context):
     * compile-error state structurally instead of scraping stdout.
     *
     * Executions in one session run one at a time; different sessions run in
-    * parallel.
+    * parallel. Without an execution timeout, a call made while another runs
+    * in the same session waits for it, forever if it never ends.
     */
   def run(code: String): ExecutionResult = synchronized:
+    // A finished abandoned thread would otherwise keep its result (a whole
+    // REPL state) reachable.
+    if abandoned.exists(!_.isAlive) then abandoned = None
     val violations = CodeValidator.validate(code)
-    if abandoned.exists(_.isAlive) then
+    if blocked then
       ExecutionResult(false, "", Some(StillRunningMessage))
     else if violations.nonEmpty then
       ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
@@ -383,17 +464,23 @@ class ManagedRepl(using Context):
     * effect). The interrupt is best-effort: blocking I/O and sleeps respond to
     * it, but a CPU-bound loop (in REPL, library or JDK code) keeps
     * running in the background. Such a thread is kept as [[abandoned]] and
-    * blocks only this session, until it ends. This is *not* a hard sandbox;
-    * true preemption requires process isolation.
+    * blocks only this session, until it ends. Its permissions are revoked as
+    * soon as it times out, so it cannot keep acting after its caller has
+    * moved on. This is *not* a hard sandbox; true preemption requires
+    * process isolation.
     */
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[(State, String, Option[Throwable])]()
     val worker = Thread(() => resultRef.set(evaluate(res)))
-    worker.setName("tacit-repl-eval")
+    worker.setName(s"tacit-repl-eval-$name")
     worker.setDaemon(true)
     worker.start()
     worker.join(limitMs)
     if worker.isAlive then
+      // Before the interrupt: code that catches it and carries on must already
+      // find every file system, network, process, LLM and permission call
+      // refused, including grants a user approves later.
+      revokeLibraryAccess(sandboxLoader, worker)
       worker.interrupt()
       // The abandoned run compiled into the next wrapper object
       // (`rs$line$N`), whose class may already be loaded. Skip its name, or
@@ -401,7 +488,9 @@ class ManagedRepl(using Context):
       state = state.copy(objectIndex = state.objectIndex + 1)
       worker.join(InterruptGraceMs)
       val stillRunning = worker.isAlive
-      if stillRunning then abandoned = Some(worker)
+      if stillRunning then
+        abandoned = Some(worker)
+        Log.log(s"REPL $name: an execution timed out and ignored its interrupt; its thread keeps running with its permissions revoked, and the REPL refuses code until it ends.")
       val message = s"Execution timed out after ${limitMs}ms" +
         (if stillRunning then
            ". It did not stop when interrupted and keeps running in the background; " +

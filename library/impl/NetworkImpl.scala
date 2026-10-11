@@ -24,6 +24,7 @@ final class NetworkImpl private[library] (
       )
 
   def validateHost(host: String): Unit =
+    InterfaceImpl.requireNotRevoked()
     if !matchers.exists(_.matcher(host).matches()) then
       throw SecurityException(
         s"Access denied: host '$host' does not match any permitted pattern in $permittedHosts"

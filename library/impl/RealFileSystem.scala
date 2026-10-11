@@ -64,6 +64,7 @@ class RealFileSystem private[library] (
     * symlink-based escape attacks.
     */
   private def resolveAndCheck(absPath: Path): Path =
+    InterfaceImpl.requireNotRevoked()
     val resolved = resolveReal(absPath)
     if !resolved.startsWith(normalizedRoot) then
       throw SecurityException(

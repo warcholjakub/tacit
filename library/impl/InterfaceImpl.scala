@@ -284,11 +284,36 @@ object InterfaceImpl:
     if !permissionOracle.compareAndSet(null, oracle) then
       throw SecurityException("The TACIT permission oracle is already installed.")
 
+  /** Threads of timed-out executions that the server gave up on but could
+    * not stop. Weak, so a finished thread does not stay reachable. */
+  private val revokedThreads =
+    java.util.Collections.synchronizedSet(
+      java.util.Collections.newSetFromMap(java.util.WeakHashMap[Thread, java.lang.Boolean]())
+    ).nn
+
+  private val RevokedMessage =
+    "Access denied: this execution timed out, so its permissions were revoked."
+
+  /** Revokes every capability of `thread`: from now on its file system,
+    * network, process and LLM calls fail and its permission requests are
+    * denied, whatever was granted before or after. The server calls it,
+    * through the sandbox class loader, for a timed-out execution that keeps
+    * running. Not reachable from agent code. */
+  private[library] def revoke(thread: Thread): Unit =
+    val _ = revokedThreads.add(thread)
+
+  /** Throws for a revoked thread. Called at every point where agent code
+    * acts on the outside world. */
+  private[library] def requireNotRevoked(): Unit =
+    if revokedThreads.contains(Thread.currentThread()) then
+      throw SecurityException(RevokedMessage)
+
   /** Asks the host about a request outside the configured bounds. Without an
     * oracle, on an answer it cannot parse, or if the oracle fails, the request
     * is denied: host errors must not reach agent code. */
   private[library] def askPermission(request: io.circe.Json): PermissionAnswer =
-    permissionOracle.get() match
+    if revokedThreads.contains(Thread.currentThread()) then PermissionAnswer.Deny(Some(RevokedMessage))
+    else permissionOracle.get() match
       case null => PermissionAnswer.Deny(None)
       case oracle =>
         scala.util.Try(oracle.apply(request.noSpaces)).toOption.flatMap(Option(_)) match

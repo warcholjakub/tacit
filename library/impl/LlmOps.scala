@@ -9,6 +9,7 @@ import com.openai.models.chat.completions.ChatCompletionCreateParams
 class LlmOps private[library] (config: Option[LlmConfig]):
 
   private def requireConfig(): LlmConfig =
+    InterfaceImpl.requireNotRevoked()
     config.getOrElse(
       throw RuntimeException(
         "LLM is not configured. Pass --llm-base-url, --llm-api-key, --llm-model or use a config file.")

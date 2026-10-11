@@ -20,6 +20,7 @@ final class ProcessPermissionImpl private[library] (
 ) extends ProcessPermission:
 
   def validateCommand(command: String, args: List[String] = List.empty): Unit =
+    InterfaceImpl.requireNotRevoked()
     if !allowedCommands.contains(command) then
       throw SecurityException(
         s"Access denied: command '$command' is not in allowed commands $allowedCommands"

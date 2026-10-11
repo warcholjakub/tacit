@@ -1,6 +1,9 @@
 import tacit.executor.{ScalaExecutor, SessionManager}
 import tacit.core.{Context, Config}
 
+import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
+
 /** Tests for the optional wall-clock execution timeout (`executionTimeoutMs`).
   * The timeout runs evaluation on a worker thread; a timed-out run must return
   * an error to the client without corrupting later session state. `Thread.sleep`
@@ -57,6 +60,8 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
 
       val refused = sm.executeInSession(stuck, "1 + 1")
       assertEquals(refused.error, Some(tacit.executor.ManagedRepl.StillRunningMessage))
+      assert(sm.getSession(stuck).exists(_.blocked))
+      assert(!sm.getSession(other).exists(_.blocked))
 
       Thread.sleep(4500)
       val recovered = sm.executeInSession(stuck, "1 + 2")
@@ -67,3 +72,58 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
     finally
       sm.deleteSession(stuck)
       sm.deleteSession(other)
+
+  test("a timed-out run that keeps going loses its permissions"):
+    val dir = Files.createTempDirectory("tacit-revoke").toRealPath()
+    val log = dir.resolve("log.txt")
+    val asked = AtomicInteger()
+    given Context = Context(
+      Config(
+        safeMode = false,
+        executionTimeoutMs = Some(500),
+        libraryConfig = io.circe.Json.obj(
+          "allowedRoots" -> io.circe.Json.arr(io.circe.Json.fromString(dir.toString))
+        )
+      ),
+      None,
+      permissionOracle = Some: _ =>
+        asked.incrementAndGet()
+        """{"allow":true}"""
+    )
+    val sm = new SessionManager
+    val sid = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
+    try
+      // Writes inside its root and asks the oracle (for a root outside it)
+      // in a loop that swallows every failure, the interrupt included.
+      val code = s"""
+        |val end = System.nanoTime + 3000000000L
+        |while System.nanoTime < end do
+        |  try
+        |    requestFileSystem("$dir") { access("$log").append("x") }
+        |    requestFileSystem("/") { access("/").exists }
+        |  catch case _: Throwable => ()
+        |  try Thread.sleep(20) catch case _: Throwable => ()
+        |""".stripMargin
+      val timedOut = sm.executeInSession(sid, code)
+      assert(timedOut.error.exists(_.contains("keeps running")), s"got: ${timedOut.error}")
+      assert(Files.size(log) > 0 && asked.get > 0, "the loop never ran before the timeout")
+      Thread.sleep(100)
+      val (size, asks) = (Files.size(log), asked.get)
+      Thread.sleep(600)
+      assertEquals(Files.size(log), size, "the abandoned run kept writing")
+      assertEquals(asked.get, asks, "the abandoned run kept asking the oracle")
+    finally sm.deleteSession(sid)
+
+  test("a deleted session whose run keeps going still counts toward the cap"):
+    given Context = ctx(300)
+    val sm = new SessionManager(maxSessions = 1)
+    val sid = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
+    val loop = "val end = System.nanoTime + 2500000000L\nwhile System.nanoTime < end do ()"
+    assert(!sm.executeInSession(sid, loop).success)
+    assert(sm.deleteSession(sid))
+    val refused = sm.createSession()
+    assert(refused.left.exists(_.contains("still running")), s"got: $refused")
+    Thread.sleep(3000)
+    val created = sm.createSession()
+    assert(created.isRight, s"got: $created")
+    created.foreach(sm.deleteSession)

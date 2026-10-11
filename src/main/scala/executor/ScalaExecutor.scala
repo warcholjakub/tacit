@@ -15,10 +15,14 @@ object ScalaExecutor:
 
 /** A REPL session that maintains state across executions */
 class ReplSession(val id: String)(using Context):
-  private val repl = ManagedRepl().init()
+  private val repl = ManagedRepl(id).init()
 
   /** Execute code in this session and return the result */
   def execute(code: String): ExecutionResult = repl.run(code)
+
+  /** Whether a timed-out execution is still running, so the session refuses
+    * code until it ends (see [[ManagedRepl.blocked]]). */
+  def blocked: Boolean = repl.blocked
 
 object ReplSession:
   def create(using Context): ReplSession = ReplSession(UUID.randomUUID().toString)
@@ -31,19 +35,31 @@ object ReplSession:
 class SessionManager(maxSessions: Int = SessionManager.MaxSessions)(using Context):
   private val sessions = TrieMap[String, ReplSession]()
 
+  /** Deleted sessions whose timed-out execution still runs: it keeps their
+    * compiler in memory, so they count toward the cap until it ends. */
+  private val retired = TrieMap[String, ReplSession]()
+
   /** Create a new session and return its ID, or a human-readable error when
     * the session cap is reached. */
-  def createSession(): Either[String, String] =
-    if sessions.size >= maxSessions then
-      Left(s"Session limit reached ($maxSessions active sessions); delete a session before creating a new one.")
+  def createSession(): Either[String, String] = synchronized:
+    retired.filterInPlace((_, session) => session.blocked)
+    if sessions.size + retired.size >= maxSessions then
+      val stuck =
+        if retired.isEmpty then ""
+        else s", ${retired.size} of them deleted but still running timed-out code"
+      Left(s"Session limit reached ($maxSessions active sessions$stuck); delete a session before creating a new one.")
     else
       val session = ReplSession.create
       sessions(session.id) = session
       Right(session.id)
 
   /** Delete a session by ID */
-  def deleteSession(sessionId: String): Boolean =
-    sessions.remove(sessionId).isDefined
+  def deleteSession(sessionId: String): Boolean = synchronized:
+    sessions.remove(sessionId) match
+      case Some(session) =>
+        if session.blocked then retired(sessionId) = session
+        true
+      case None => false
 
   /** Get a session by ID */
   def getSession(sessionId: String): Option[ReplSession] =
