@@ -3,55 +3,57 @@ package tacit.executor
 import tacit.core.{Context, Config}
 
 /** The process-wide limit on timed-out executions that keep running, and
-  * deleted sessions that are still running code. Safe mode is off so the
-  * loops can sleep: each one swallows its interrupt and ends after a few
-  * seconds. */
+  * deleted sessions that are still running code. Runs are kept stuck in a
+  * [[BlockingOracle]], outside REPL code, until the test releases them. */
 class AbandonedLimitSuite extends munit.FunSuite:
-  private given Context = Context(Config(safeMode = false, executionTimeoutMs = Some(300)), None)
-
-  private def loop(seconds: Int): String =
-    s"""val end = System.nanoTime + ${seconds}000000000L
-       |while System.nanoTime < end do
-       |  try Thread.sleep(50) catch case _: InterruptedException => ()""".stripMargin
-
   private def awaitAbandoned(count: Int): Unit =
-    val deadline = System.nanoTime + 15000000000L
-    while ManagedRepl.abandonedExecutions > count && System.nanoTime < deadline do Thread.sleep(100)
-    assertEquals(ManagedRepl.abandonedExecutions, count)
+    BlockingOracle.eventually(ManagedRepl.abandonedExecutions == count, s"$count abandoned executions remain")
 
   // Runs left by other suites end on their own; the counts below are exact
   // only once they have.
   override def beforeEach(context: BeforeEach): Unit = awaitAbandoned(0)
 
   test("stateless executions and new sessions are refused while too many timed-out runs keep going"):
+    val oracle = BlockingOracle()
+    given Context = oracle.context(500)
     val saved = ManagedRepl.maxAbandoned
     ManagedRepl.maxAbandoned = 2
     try
       for _ <- 1 to 2 do
-        val r = ScalaExecutor.execute(loop(4))
+        val r = ScalaExecutor.execute(BlockingOracle.StuckCode)
         assert(r.error.exists(_.contains("keeps running")), s"got: ${r.error}")
       assertEquals(ManagedRepl.abandonedExecutions, 2)
       val refused = ScalaExecutor.execute("1 + 1")
       assert(refused.error.exists(_.contains("timed-out executions")), s"got: ${refused.error}")
-      val sm = new SessionManager
-      val noSession = sm.createSession()
+      val noSession = (new SessionManager).createSession()
       assert(noSession.left.exists(_.contains("timed-out executions")), s"got: $noSession")
 
+      oracle.release()
       awaitAbandoned(0)
       assert(ScalaExecutor.execute("1 + 1").success)
-    finally ManagedRepl.maxAbandoned = saved
+    finally
+      oracle.release()
+      ManagedRepl.maxAbandoned = saved
 
-  test("a session deleted while its code runs, before any timeout, still counts toward the cap"):
+  test("a session deleted while its code runs or waits to run still counts toward the cap"):
+    val oracle = BlockingOracle()
+    given Context = oracle.context(60000) // no timeout during the test
     val sm = new SessionManager(maxSessions = 1)
     val id = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
-    val call = Thread(() => { val _ = sm.executeInSession(id, loop(3)) })
-    call.start()
-    Thread.sleep(150) // the run has started but not timed out yet
-    assert(sm.deleteSession(id))
-    val refused = sm.createSession()
-    assert(refused.left.exists(_.contains("still running")), s"got: $refused")
-    call.join()
-    awaitAbandoned(0)
+    val first = Thread(() => { val _ = sm.executeInSession(id, BlockingOracle.StuckCode) })
+    val queued = Thread(() => { val _ = sm.executeInSession(id, "1 + 1") })
+    try
+      first.start()
+      oracle.awaitCalls(1) // running, inside the oracle
+      queued.start()
+      Thread.sleep(100) // waiting behind it
+      assert(sm.deleteSession(id))
+      val refused = sm.createSession()
+      assert(refused.left.exists(_.contains("still running")), s"got: $refused")
+    finally
+      oracle.release()
+      first.join()
+      queued.join()
     val created = sm.createSession()
     assert(created.isRight, s"got: $created")
     created.foreach(sm.deleteSession)

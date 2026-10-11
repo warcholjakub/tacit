@@ -312,13 +312,16 @@ object InterfaceImpl:
     * oracle, on an answer it cannot parse, or if the oracle fails, the request
     * is denied: host errors must not reach agent code. */
   private[library] def askPermission(request: io.circe.Json): PermissionAnswer =
-    if revokedThreads.contains(Thread.currentThread()) then PermissionAnswer.Deny(Some(RevokedMessage))
+    def revoked = revokedThreads.contains(Thread.currentThread())
+    if revoked then PermissionAnswer.Deny(Some(RevokedMessage))
     else permissionOracle.get() match
       case null => PermissionAnswer.Deny(None)
       case oracle =>
-        scala.util.Try(oracle.apply(request.noSpaces)).toOption.flatMap(Option(_)) match
+        val answer = scala.util.Try(oracle.apply(request.noSpaces)).toOption.flatMap(Option(_)) match
           case Some(answer) => PermissionAnswer.fromJson(answer)
           case None => PermissionAnswer.Deny(None)
+        // Revoked while the oracle was deciding: a grant is no use to it.
+        if revoked then PermissionAnswer.Deny(Some(RevokedMessage)) else answer
 
   /** `toRealPath` of `path` if it exists, otherwise the real path of its
     * nearest existing ancestor with the remaining components appended. */

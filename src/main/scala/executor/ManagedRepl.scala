@@ -47,7 +47,10 @@ object ManagedRepl:
   /** [[MaxAbandonedExecutions]], lowered by tests. */
   @volatile private[executor] var maxAbandoned: Int = MaxAbandonedExecutions
 
-  /** Why a new session or stateless execution must be refused, if it must. */
+  /** Why a new session or stateless execution must be refused, if it must.
+    * Check-then-act: callers that check at the same time can all pass, so
+    * the real bound is the limit plus the number of concurrent calls. The
+    * MCP server makes one call at a time. */
   def abandonedLimitReached: Option[String] =
     val max = maxAbandoned
     Option.when(abandonedCount.get() >= max)(
@@ -142,25 +145,43 @@ object ManagedRepl:
       "-Wsafe-init",
       "-language:experimental.captureChecking",
       "-language:experimental.modularity",
-      // No interrupt instrumentation. With the default (`true`) the REPL
-      // loader re-defines every non-JDK class it touches, including the
-      // library's, so the library would exist twice (once in
-      // `sandboxedClassLoader`, once instrumented in the REPL loader) with
-      // separate static state, and the config registered by
-      // `configureLibrary` would not be the one agent code sees. `local`
-      // instruments REPL code with calls to `dotty.tools.repl.StopRepl`, which
-      // the sandboxed parent loader cannot resolve. Nothing here sets the
-      // REPL stop flag anyway: timeouts rely on `Thread.interrupt`.
-      "-Xrepl-interrupt-instrumentation:false"
+      // Only REPL code is instrumented: every method entry and backward jump
+      // calls `dotty.tools.repl.StopRepl.throwIfReplStopped`, so a timed-out
+      // loop in agent code can be stopped (see [[SandboxClassLoader]]). The
+      // default (`true`) would also re-define every non-JDK class the REPL
+      // loader touches, including the library's, so the library would exist
+      // twice with separate static state, and the config registered by
+      // `configureLibrary` would not be the one agent code sees.
+      "-Xrepl-interrupt-instrumentation:local"
     )
 
   /** Exposes only JDK platform classes and the library JARs (core + plugins),
     * keeping user code away from server internals (tacit.core, tacit.mcp,
     * tacit.executor) and server dependencies (circe, scopt, etc.).
     */
-  private def sandboxedClassLoader(using Context): ClassLoader =
-    val urls = replClasspathJars.map(p => JFile(p).toURI.toURL).toArray
-    new URLClassLoader(urls, ClassLoader.getPlatformClassLoader)
+  private def sandboxedClassLoader(using Context): SandboxClassLoader =
+    SandboxClassLoader(replClasspathJars.map(p => JFile(p).toURI.toURL).toArray)
+
+  private val StopReplClass = "dotty.tools.repl.StopRepl"
+
+  private lazy val stopReplBytes: Array[Byte] =
+    val in = classOf[StopRepl].getResourceAsStream("StopRepl.class").nn
+    try in.readAllBytes().nn finally in.close()
+
+  /** Also defines its own copy of `dotty.tools.repl.StopRepl`, the class that
+    * instrumented REPL code checks. Its stop flag is static, so each session
+    * gets its own: setting it stops that session's runaway code only.
+    */
+  private[executor] final class SandboxClassLoader(urls: Array[java.net.URL])
+      extends URLClassLoader(urls, ClassLoader.getPlatformClassLoader):
+    override protected def findClass(name: String): Class[?] =
+      if name == StopReplClass then defineClass(name, stopReplBytes, 0, stopReplBytes.length)
+      else super.findClass(name)
+
+    /** Makes REPL code running in this sandbox throw `ThreadDeath` at its next
+      * method call or loop iteration, or lets it run again. */
+    def setStop(stop: Boolean): Unit =
+      val _ = loadClass(StopReplClass).getMethod("setStop", classOf[Boolean]).invoke(null, stop)
 
   /** Core tacit-library preamble: imports the tacit Interface and exposes
     * `api.*`. Used when no plugin is loaded, or when every loaded plugin
@@ -375,11 +396,13 @@ class ManagedRepl(name: String = "stateless")(using Context):
     * until it ends, which a host should count against its limits. */
   def blocked: Boolean = abandoned.exists(_.isAlive)
 
-  @volatile private var running = false
+  /** Calls in [[run]], counted before they take the monitor, so a call
+    * queued behind another counts too. */
+  private val callers = java.util.concurrent.atomic.AtomicInteger()
 
-  /** Whether code is running, or a timed-out evaluation still is. Deleting a
-    * busy REPL does not free its memory yet. */
-  def busy: Boolean = running || blocked
+  /** Whether code is running or waiting to run, or a timed-out evaluation
+    * still is. Deleting a busy REPL does not free its memory yet. */
+  def busy: Boolean = callers.get() > 0 || blocked
 
   private val outputCapture = new BoundedOutputStream(MaxOutputBytes)
   private val printStream = new PrintStream(outputCapture, true, StandardCharsets.UTF_8)
@@ -409,15 +432,17 @@ class ManagedRepl(name: String = "stateless")(using Context):
     * parallel. Without an execution timeout, a call made while another runs
     * in the same session waits for it, forever if it never ends.
     */
-  def run(code: String): ExecutionResult = synchronized:
-    running = true
-    try runLocked(code)
-    finally running = false
+  def run(code: String): ExecutionResult =
+    callers.incrementAndGet()
+    try synchronized(runLocked(code))
+    finally callers.decrementAndGet()
 
   private def runLocked(code: String): ExecutionResult =
     // A finished abandoned thread would otherwise keep its result (a whole
     // REPL state) reachable.
-    if abandoned.exists(!_.isAlive) then abandoned = None
+    if abandoned.exists(!_.isAlive) then
+      abandoned = None
+      sandboxLoader.setStop(false)
     val violations = CodeValidator.validate(code)
     if blocked then
       ExecutionResult(false, "", Some(StillRunningMessage))
@@ -493,14 +518,14 @@ class ManagedRepl(name: String = "stateless")(using Context):
   /** Run the evaluation on a worker thread, bounding it to `limitMs`.
     *
     * On timeout the client gets a prompt error instead of hanging, and the
-    * session keeps its prior state (the abandoned statement has no observable
-    * effect). The interrupt is best-effort: blocking I/O and sleeps respond to
-    * it, but a CPU-bound loop (in REPL, library or JDK code) keeps
-    * running in the background. Such a thread is kept as [[abandoned]] and
-    * blocks only this session, until it ends. Its permissions are revoked as
-    * soon as it times out, so it cannot keep acting after its caller has
-    * moved on. This is *not* a hard sandbox; true preemption requires
-    * process isolation.
+    * session keeps its prior state. On timeout the run's permissions are
+    * revoked, its sandbox's stop flag is set, so REPL code throws
+    * `ThreadDeath` at its next method call or loop iteration, and it is
+    * interrupted, which ends blocking I/O and sleeps. A run stuck in library
+    * or JDK code (a CPU-bound call, a blocking oracle) reaches none of these
+    * and keeps running. Such a thread is kept as [[abandoned]] and blocks
+    * only this session, until it ends. This is *not* a hard sandbox; true
+    * preemption requires process isolation.
     */
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[(State, String, Option[Throwable])]()
@@ -508,7 +533,11 @@ class ManagedRepl(name: String = "stateless")(using Context):
     // Finished (by the worker, uncounted if it was abandoned).
     val phase = java.util.concurrent.atomic.AtomicInteger(Running)
     val worker = Thread: () =>
+      // ThreadDeath is how a stopped run ends; it is not NonFatal, so
+      // withOutputCapture lets it through, and uncaught it would be printed
+      // to the host's stderr.
       try resultRef.set(evaluate(res))
+      catch case _: ThreadDeath => ()
       finally
         if phase.getAndSet(Finished) == Abandoned then
           val _ = abandonedCount.decrementAndGet()
@@ -526,6 +555,9 @@ class ManagedRepl(name: String = "stateless")(using Context):
       try revokeLibraryAccess(sandboxLoader, worker)
       catch case scala.util.control.NonFatal(e) =>
         Log.warn(s"REPL $name: could not revoke the permissions of a timed-out execution (${e.getClass.getName}: ${e.getMessage}); is the library JAR older than the server?")
+      try sandboxLoader.setStop(true)
+      catch case scala.util.control.NonFatal(e) =>
+        Log.warn(s"REPL $name: could not stop a timed-out execution (${e.getClass.getName}: ${e.getMessage})")
       worker.interrupt()
       // The abandoned run compiled into the next wrapper object
       // (`rs$line$N`), whose class may already be loaded. Skip its name, or
@@ -533,6 +565,10 @@ class ManagedRepl(name: String = "stateless")(using Context):
       state = state.copy(objectIndex = state.objectIndex + 1)
       worker.join(InterruptGraceMs)
       val stillRunning = worker.isAlive
+      // A run still going is stuck outside REPL code (in library or JDK code);
+      // the flag stays set so it stops if it gets back, and is cleared once
+      // its thread has ended (see run).
+      if !stillRunning then sandboxLoader.setStop(false)
       if stillRunning then
         abandoned = Some(worker)
         abandonedCount.incrementAndGet()

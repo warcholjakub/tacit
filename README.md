@@ -633,17 +633,25 @@ zero or negative values are rejected at startup. On timeout the client receives 
 prompt error instead of hanging, and for stateful sessions the session keeps
 its prior state, so the abandoned statement has no observable effect.
 
-The watchdog runs each evaluation on a worker thread and is **best-effort**:
-interrupt-responsive work (blocking I/O, sleeps, most library calls) is reliably
-bounded, but a pure CPU loop that never checks for interruption keeps running in
-the background. Its permissions are revoked the moment it times out: its file,
-network, process and LLM calls fail and its permission requests are denied.
-Its session then refuses to run code until the loop ends, and keeps counting
-toward the session limit even if deleted. While 10 such executions are running
-in the process, new sessions and stateless executions are refused. Other sessions are unaffected, since
-sessions run in parallel (this helps hosts that embed TACIT; the MCP server
-itself handles one request at a time). Hard preemption would require
-process-level isolation; this knob is a robustness guard, not a sandbox
+The watchdog runs each evaluation on a worker thread. On timeout it stops the
+run: REPL code is instrumented to check a per-session stop flag at every method
+call and loop iteration, so a runaway loop in agent code ends at the timeout,
+and blocking I/O and sleeps are interrupted. Its permissions are revoked at the
+same moment: its file, network, process and LLM calls fail and its permission
+requests are denied.
+
+This is **best-effort**. A run stuck inside library or JDK code (a long
+CPU-bound call, a blocking host callback) reaches no check and keeps running in
+the background. Its session then refuses to run code until it ends, and keeps
+counting toward the session limit even if deleted. While 10 such executions are
+running in the process, new sessions and stateless executions are refused.
+Other sessions are unaffected, since sessions run in parallel (this helps hosts
+that embed TACIT; the MCP server itself handles one request at a time).
+
+Stopping and revocation apply to the thread that runs the code, so they rely on
+safe mode, which keeps agent code from starting threads; without it, work
+handed to another thread is neither stopped nor revoked. Hard preemption would
+require process-level isolation; this knob is a robustness guard, not a sandbox
 boundary. When unset (the default), evaluations run without a timeout.
 
 Output is captured per execution, from the thread that runs it. Output from

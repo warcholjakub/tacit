@@ -1,8 +1,6 @@
-import tacit.executor.{ScalaExecutor, SessionManager}
+import tacit.executor.{BlockingOracle, ManagedRepl, ScalaExecutor, SessionManager}
 import tacit.core.{Context, Config}
 
-import java.nio.file.Files
-import java.util.concurrent.atomic.AtomicInteger
 
 /** Tests for the optional wall-clock execution timeout (`executionTimeoutMs`).
   * The timeout runs evaluation on a worker thread; a timed-out run must return
@@ -41,89 +39,101 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
       assert(after.output.contains("42"))
     finally sm.deleteSession(sid)
 
-  test("a loop that ignores the interrupt blocks only its own session"):
-    given Context = ctx(500)
+  test("a runaway loop is stopped at the timeout and the session keeps working"):
+    given Context = Context(Config(executionTimeoutMs = Some(1500)), None) // safe mode
+    val sm = new SessionManager
+    val sid = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
+    try
+      assert(sm.executeInSession(sid, "val x = 41").success)
+      val abandonedBefore = ManagedRepl.abandonedExecutions
+      for loop <- List(
+          "while true do ()",
+          // Catching the stop does not save it: the outer loop checks again.
+          "while true do\n  try { while true do () } catch { case _: Throwable => () }"
+        )
+      do
+        val stopped = sm.executeInSession(sid, loop)
+        assert(stopped.error.exists(_.contains("timed out")), s"got: ${stopped.error}")
+        assert(!stopped.error.exists(_.contains("keeps running")), s"got: ${stopped.error}")
+        assert(!sm.getSession(sid).exists(_.blocked))
+        assertEquals(ManagedRepl.abandonedExecutions, abandonedBefore)
+      val after = sm.executeInSession(sid, "x + 1")
+      assert(after.output.contains("42"), s"got: ${after.error.getOrElse(after.output)}")
+    finally sm.deleteSession(sid)
+
+  test("safe mode rejects starting threads, which stopping and revocation rely on"):
+    given Context = Context(Config(), None)
+    List(
+      "Thread(() => ()).start()",
+      "Thread.ofVirtual().start(() => ())",
+      "java.util.concurrent.Executors.newSingleThreadExecutor()",
+      "java.util.concurrent.CompletableFuture.runAsync(() => ())",
+      "scala.concurrent.Future(1)(using scala.concurrent.ExecutionContext.global)"
+    ).foreach: code =>
+      val r = ScalaExecutor.execute(code)
+      assert(!r.success, s"$code was accepted: ${r.output}")
+
+  test("a run stuck outside REPL code blocks only its own session"):
+    val oracle = BlockingOracle()
+    given Context = oracle.context(500)
     val sm = new SessionManager
     val stuck = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
     val other = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
     try
-      // Spins for 4s without checking the interrupt flag.
-      val loop = "val end = System.nanoTime + 4000000000L\nwhile System.nanoTime < end do ()"
-      val timedOut = sm.executeInSession(stuck, loop)
-      assert(!timedOut.success)
+      val timedOut = sm.executeInSession(stuck, BlockingOracle.StuckCode)
       assert(timedOut.error.exists(_.contains("keeps running")), s"got: ${timedOut.error}")
+      assert(sm.getSession(stuck).exists(_.blocked))
 
       val started = System.nanoTime
       val unaffected = sm.executeInSession(other, "1 + 1")
       assert(unaffected.success, s"got: ${unaffected.error.getOrElse(unaffected.output)}")
-      assert((System.nanoTime - started) / 1000000 < 3000, "the other session waited for the loop")
-
-      val refused = sm.executeInSession(stuck, "1 + 1")
-      assertEquals(refused.error, Some(tacit.executor.ManagedRepl.StillRunningMessage))
-      assert(sm.getSession(stuck).exists(_.blocked))
+      assert((System.nanoTime - started) / 1000000 < 10000, "the other session waited for the stuck one")
       assert(!sm.getSession(other).exists(_.blocked))
 
-      Thread.sleep(4500)
+      val refused = sm.executeInSession(stuck, "1 + 1")
+      assertEquals(refused.error, Some(ManagedRepl.StillRunningMessage))
+
+      oracle.release()
+      BlockingOracle.eventually(!sm.getSession(stuck).exists(_.blocked), "the stuck run ends")
       val recovered = sm.executeInSession(stuck, "1 + 2")
-      assert(recovered.success, s"got: ${recovered.error.getOrElse(recovered.output)}")
       // Its own result, not the abandoned run's (both compile to a wrapper
       // object named after the run).
-      assert(recovered.output.contains("3"), s"got: ${recovered.output}")
+      assert(recovered.output.contains("3"), s"got: ${recovered.error.getOrElse(recovered.output)}")
     finally
+      oracle.release()
       sm.deleteSession(stuck)
       sm.deleteSession(other)
 
-  test("a timed-out run that keeps going loses its permissions"):
-    val dir = Files.createTempDirectory("tacit-revoke").toRealPath()
-    val log = dir.resolve("log.txt")
-    val asked = AtomicInteger()
-    given Context = Context(
-      Config(
-        safeMode = false,
-        executionTimeoutMs = Some(500),
-        libraryConfig = io.circe.Json.obj(
-          "allowedRoots" -> io.circe.Json.arr(io.circe.Json.fromString(dir.toString))
-        )
-      ),
-      None,
-      permissionOracle = Some: _ =>
-        asked.incrementAndGet()
-        """{"allow":true}"""
-    )
+  test("a stuck run's permission requests are refused once it times out"):
+    val oracle = BlockingOracle()
+    given Context = oracle.context(500)
     val sm = new SessionManager
     val sid = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
     try
-      // Writes inside its root and asks the oracle (for a root outside it)
-      // in a loop that swallows every failure, the interrupt included.
-      val code = s"""
-        |val end = System.nanoTime + 3000000000L
-        |while System.nanoTime < end do
-        |  try
-        |    requestFileSystem("$dir") { access("$log").append("x") }
-        |    requestFileSystem("/") { access("/").exists }
-        |  catch case _: Throwable => ()
-        |  try Thread.sleep(20) catch case _: Throwable => ()
-        |""".stripMargin
+      // The first request waits in the oracle past the timeout; once released,
+      // the second one would reach the oracle unless the run was revoked.
+      val code =
+        s"""try ${BlockingOracle.StuckCode} catch { case _: Throwable => () }
+           |requestFileSystem("/tmp") { () }""".stripMargin
       val timedOut = sm.executeInSession(sid, code)
       assert(timedOut.error.exists(_.contains("keeps running")), s"got: ${timedOut.error}")
-      assert(Files.size(log) > 0 && asked.get > 0, "the loop never ran before the timeout")
-      Thread.sleep(100)
-      val (size, asks) = (Files.size(log), asked.get)
-      Thread.sleep(600)
-      assertEquals(Files.size(log), size, "the abandoned run kept writing")
-      assertEquals(asked.get, asks, "the abandoned run kept asking the oracle")
-    finally sm.deleteSession(sid)
+      oracle.release()
+      BlockingOracle.eventually(!sm.getSession(sid).exists(_.blocked), "the stuck run ends")
+      assertEquals(oracle.calls.get, 1, "the revoked run asked the oracle again")
+    finally
+      oracle.release()
+      sm.deleteSession(sid)
 
   test("a deleted session whose run keeps going still counts toward the cap"):
-    given Context = ctx(300)
+    val oracle = BlockingOracle()
+    given Context = oracle.context(500)
     val sm = new SessionManager(maxSessions = 1)
     val sid = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
-    val loop = "val end = System.nanoTime + 2500000000L\nwhile System.nanoTime < end do ()"
-    assert(!sm.executeInSession(sid, loop).success)
-    assert(sm.deleteSession(sid))
-    val refused = sm.createSession()
-    assert(refused.left.exists(_.contains("still running")), s"got: $refused")
-    Thread.sleep(3000)
-    val created = sm.createSession()
-    assert(created.isRight, s"got: $created")
-    created.foreach(sm.deleteSession)
+    try
+      assert(!sm.executeInSession(sid, BlockingOracle.StuckCode).success)
+      assert(sm.deleteSession(sid))
+      val refused = sm.createSession()
+      assert(refused.left.exists(_.contains("still running")), s"got: $refused")
+      oracle.release()
+      BlockingOracle.eventually(sm.createSession().fold(_ => false, id => { sm.deleteSession(id); true }), "a session can be created")
+    finally oracle.release()
