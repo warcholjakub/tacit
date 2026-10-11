@@ -63,15 +63,18 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
 
   test("safe mode rejects starting threads, which stopping and revocation rely on"):
     given Context = Context(Config(), None)
-    List(
+    // Virtual threads exist from JDK 21; on older JDKs there is nothing to reject.
+    val virtualThreads =
+      if Runtime.version().feature() >= 21 then
+        List("Thread.ofVirtual().start(() => ())", "Thread.startVirtualThread(() => ())")
+      else Nil
+    (List(
       "Thread(() => ()).start()",
-      "Thread.ofVirtual().start(() => ())",
-      "Thread.startVirtualThread(() => ())",
       "java.util.concurrent.Executors.newSingleThreadExecutor()",
       "java.util.concurrent.CompletableFuture.runAsync(() => ())",
       "scala.concurrent.Future(1)(using scala.concurrent.ExecutionContext.global)",
       "java.util.Timer()"
-    ).foreach: code =>
+    ) ++ virtualThreads).foreach: code =>
       val r = ScalaExecutor.execute(code)
       assert(!r.success, s"$code was accepted: ${r.output}")
       // Rejected by safe mode, not by some other compile error.
