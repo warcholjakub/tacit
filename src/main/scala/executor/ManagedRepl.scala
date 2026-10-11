@@ -44,10 +44,10 @@ object ManagedRepl:
 
   def abandonedExecutions: Int = abandonedCount.get()
 
-  /** Why a new session or stateless execution must be refused, if it must. */
   /** [[MaxAbandonedExecutions]], lowered by tests. */
   @volatile private[executor] var maxAbandoned: Int = MaxAbandonedExecutions
 
+  /** Why a new session or stateless execution must be refused, if it must. */
   def abandonedLimitReached: Option[String] =
     val max = maxAbandoned
     Option.when(abandonedCount.get() >= max)(
