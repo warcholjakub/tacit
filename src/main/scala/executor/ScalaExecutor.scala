@@ -11,7 +11,9 @@ object ScalaExecutor:
 
   /** Execute a Scala code snippet stateless and return the result */
   def execute(code: String)(using Context): ExecutionResult =
-    ManagedRepl().init().run(code)
+    ManagedRepl.abandonedLimitReached match
+      case Some(reason) => ExecutionResult(false, "", Some(reason))
+      case None         => ManagedRepl().init().run(code)
 
 /** A REPL session that maintains state across executions */
 class ReplSession(val id: String)(using Context):
@@ -24,6 +26,10 @@ class ReplSession(val id: String)(using Context):
     * code until it ends (see [[ManagedRepl.blocked]]). */
   def blocked: Boolean = repl.blocked
 
+  /** Whether code is running in this session, or a timed-out execution
+    * still is (see [[ManagedRepl.busy]]). */
+  def busy: Boolean = repl.busy
+
 object ReplSession:
   def create(using Context): ReplSession = ReplSession(UUID.randomUUID().toString)
 
@@ -35,29 +41,31 @@ object ReplSession:
 class SessionManager(maxSessions: Int = SessionManager.MaxSessions)(using Context):
   private val sessions = TrieMap[String, ReplSession]()
 
-  /** Deleted sessions whose timed-out execution still runs: it keeps their
+  /** Deleted sessions still running code, timed out or not: they keep their
     * compiler in memory, so they count toward the cap until it ends. */
   private val retired = TrieMap[String, ReplSession]()
 
   /** Create a new session and return its ID, or a human-readable error when
     * the session cap is reached. */
   def createSession(): Either[String, String] = synchronized:
-    retired.filterInPlace((_, session) => session.blocked)
+    retired.filterInPlace((_, session) => session.busy)
     if sessions.size + retired.size >= maxSessions then
       val stuck =
         if retired.isEmpty then ""
-        else s", ${retired.size} of them deleted but still running timed-out code"
+        else s", ${retired.size} of them deleted but still running code"
       Left(s"Session limit reached ($maxSessions active sessions$stuck); delete a session before creating a new one.")
-    else
-      val session = ReplSession.create
-      sessions(session.id) = session
-      Right(session.id)
+    else ManagedRepl.abandonedLimitReached match
+      case Some(reason) => Left(reason)
+      case None =>
+        val session = ReplSession.create
+        sessions(session.id) = session
+        Right(session.id)
 
   /** Delete a session by ID */
   def deleteSession(sessionId: String): Boolean = synchronized:
     sessions.remove(sessionId) match
       case Some(session) =>
-        if session.blocked then retired(sessionId) = session
+        if session.busy then retired(sessionId) = session
         true
       case None => false
 

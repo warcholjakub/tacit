@@ -639,7 +639,8 @@ bounded, but a pure CPU loop that never checks for interruption keeps running in
 the background. Its permissions are revoked the moment it times out: its file,
 network, process and LLM calls fail and its permission requests are denied.
 Its session then refuses to run code until the loop ends, and keeps counting
-toward the session limit even if deleted. Other sessions are unaffected, since
+toward the session limit even if deleted. While 10 such executions are running
+in the process, new sessions and stateless executions are refused. Other sessions are unaffected, since
 sessions run in parallel (this helps hosts that embed TACIT; the MCP server
 itself handles one request at a time). Hard preemption would require
 process-level isolation; this knob is a robustness guard, not a sandbox

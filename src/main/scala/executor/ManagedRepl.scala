@@ -33,6 +33,28 @@ object ManagedRepl:
     * before the session treats it as still running. */
   private val InterruptGraceMs: Long = 200
 
+  /** How many timed-out executions may keep running, across every REPL in
+    * the process, before new sessions and stateless executions are refused.
+    * Each keeps a whole compiler in memory until it ends. */
+  val MaxAbandonedExecutions: Int = 10
+
+  /** Timed-out executions still running, process-wide (see
+    * [[MaxAbandonedExecutions]]). */
+  private val abandonedCount = java.util.concurrent.atomic.AtomicInteger()
+
+  def abandonedExecutions: Int = abandonedCount.get()
+
+  /** Why a new session or stateless execution must be refused, if it must. */
+  /** [[MaxAbandonedExecutions]], lowered by tests. */
+  @volatile private[executor] var maxAbandoned: Int = MaxAbandonedExecutions
+
+  def abandonedLimitReached: Option[String] =
+    val max = maxAbandoned
+    Option.when(abandonedCount.get() >= max)(
+      s"$max timed-out executions are still running in the background, " +
+        "so no new session or stateless execution can start until some of them end."
+    )
+
   val StillRunningMessage: String =
     "An earlier execution in this session timed out and is still running in the background; " +
       "this session cannot run code until it ends."
@@ -353,6 +375,12 @@ class ManagedRepl(name: String = "stateless")(using Context):
     * until it ends, which a host should count against its limits. */
   def blocked: Boolean = abandoned.exists(_.isAlive)
 
+  @volatile private var running = false
+
+  /** Whether code is running, or a timed-out evaluation still is. Deleting a
+    * busy REPL does not free its memory yet. */
+  def busy: Boolean = running || blocked
+
   private val outputCapture = new BoundedOutputStream(MaxOutputBytes)
   private val printStream = new PrintStream(outputCapture, true, StandardCharsets.UTF_8)
   private val sandboxLoader = sandboxedClassLoader
@@ -382,6 +410,11 @@ class ManagedRepl(name: String = "stateless")(using Context):
     * in the same session waits for it, forever if it never ends.
     */
   def run(code: String): ExecutionResult = synchronized:
+    running = true
+    try runLocked(code)
+    finally running = false
+
+  private def runLocked(code: String): ExecutionResult =
     // A finished abandoned thread would otherwise keep its result (a whole
     // REPL state) reachable.
     if abandoned.exists(!_.isAlive) then abandoned = None
@@ -471,7 +504,14 @@ class ManagedRepl(name: String = "stateless")(using Context):
     */
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[(State, String, Option[Throwable])]()
-    val worker = Thread(() => resultRef.set(evaluate(res)))
+    // Running -> Abandoned (by this thread, counted in abandonedCount) ->
+    // Finished (by the worker, uncounted if it was abandoned).
+    val phase = java.util.concurrent.atomic.AtomicInteger(Running)
+    val worker = Thread: () =>
+      try resultRef.set(evaluate(res))
+      finally
+        if phase.getAndSet(Finished) == Abandoned then
+          val _ = abandonedCount.decrementAndGet()
     worker.setName(s"tacit-repl-eval-$name")
     worker.setDaemon(true)
     worker.start()
@@ -480,7 +520,12 @@ class ManagedRepl(name: String = "stateless")(using Context):
       // Before the interrupt: code that catches it and carries on must already
       // find every file system, network, process, LLM and permission call
       // refused, including grants a user approves later.
-      revokeLibraryAccess(sandboxLoader, worker)
+      // A library JAR older than this server has no `revoke`; the run must
+      // still be interrupted and abandoned, or the next one would share the
+      // driver with it.
+      try revokeLibraryAccess(sandboxLoader, worker)
+      catch case scala.util.control.NonFatal(e) =>
+        Log.warn(s"REPL $name: could not revoke the permissions of a timed-out execution (${e.getClass.getName}: ${e.getMessage}); is the library JAR older than the server?")
       worker.interrupt()
       // The abandoned run compiled into the next wrapper object
       // (`rs$line$N`), whose class may already be loaded. Skip its name, or
@@ -490,6 +535,11 @@ class ManagedRepl(name: String = "stateless")(using Context):
       val stillRunning = worker.isAlive
       if stillRunning then
         abandoned = Some(worker)
+        abandonedCount.incrementAndGet()
+        // The worker may have finished since isAlive; then it did not see
+        // Abandoned and will not undo the count, so undo it here.
+        if !phase.compareAndSet(Running, Abandoned) then
+          val _ = abandonedCount.decrementAndGet()
         Log.log(s"REPL $name: an execution timed out and ignored its interrupt; its thread keeps running with its permissions revoked, and the REPL refuses code until it ends.")
       val message = s"Execution timed out after ${limitMs}ms" +
         (if stillRunning then
@@ -501,6 +551,10 @@ class ManagedRepl(name: String = "stateless")(using Context):
       resultRef.get() match
         case null      => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
         case evaluated => adopt(res, evaluated)
+
+  private inline val Running = 0
+  private inline val Abandoned = 1
+  private inline val Finished = 2
 
   private def formatDiagnostics(diags: List[Diagnostic]): String =
     diags.map: d =>
