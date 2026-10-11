@@ -636,7 +636,8 @@ its prior state, so the abandoned statement has no observable effect.
 The watchdog runs each evaluation on a worker thread and is **best-effort**:
 interrupt-responsive work (blocking I/O, sleeps, most library calls) is reliably
 bounded, but a pure CPU loop that never checks for interruption keeps running in
-the background and continues to hold the REPL's output lock. Hard preemption
+the background. Its session then refuses to run code until the loop ends; other
+sessions are unaffected, since sessions run in parallel. Hard preemption
 would require process-level isolation; this knob is a robustness guard, not a
 sandbox boundary. When unset (the default), evaluations run without a timeout.
 

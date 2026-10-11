@@ -37,3 +37,33 @@ class ExecutionTimeoutSuite extends munit.FunSuite:
       assert(after.success, s"session broken after timeout: ${after.error.getOrElse(after.output)}")
       assert(after.output.contains("42"))
     finally sm.deleteSession(sid)
+
+  test("a loop that ignores the interrupt blocks only its own session"):
+    given Context = ctx(500)
+    val sm = new SessionManager
+    val stuck = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
+    val other = sm.createSession().fold(err => fail(s"session creation failed: $err"), identity)
+    try
+      // Spins for 4s without checking the interrupt flag.
+      val loop = "val end = System.nanoTime + 4000000000L\nwhile System.nanoTime < end do ()"
+      val timedOut = sm.executeInSession(stuck, loop)
+      assert(!timedOut.success)
+      assert(timedOut.error.exists(_.contains("keeps running")), s"got: ${timedOut.error}")
+
+      val started = System.nanoTime
+      val unaffected = sm.executeInSession(other, "1 + 1")
+      assert(unaffected.success, s"got: ${unaffected.error.getOrElse(unaffected.output)}")
+      assert((System.nanoTime - started) / 1000000 < 3000, "the other session waited for the loop")
+
+      val refused = sm.executeInSession(stuck, "1 + 1")
+      assertEquals(refused.error, Some(tacit.executor.ManagedRepl.StillRunningMessage))
+
+      Thread.sleep(4500)
+      val recovered = sm.executeInSession(stuck, "1 + 2")
+      assert(recovered.success, s"got: ${recovered.error.getOrElse(recovered.output)}")
+      // Its own result, not the abandoned run's (both compile to a wrapper
+      // object named after the run).
+      assert(recovered.output.contains("3"), s"got: ${recovered.output}")
+    finally
+      sm.deleteSession(stuck)
+      sm.deleteSession(other)
