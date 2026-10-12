@@ -166,11 +166,23 @@ class WebOpsSuite extends munit.FunSuite:
     val result = WebOps.httpGet(s"$baseUrl/whoami", Map.empty, Map("Authorization" -> token))
     assertEquals(result, "Bearer secret-xyz")                    // yet transmitted to the allowlisted host
 
-  test("secretHeaders: a failed Classified value aborts the request"):
+  test("secretHeaders: a failed Classified value aborts the request without its exception"):
     given Network = NetworkImpl(Set("localhost"))
-    val bad = ClassifiedImpl.wrap[String](throw RuntimeException("boom"))
-    intercept[RuntimeException]:
+    // The computation's exception may carry the secret, e.g. map(v => throw E(v)).
+    val bad = ClassifiedImpl.wrap[String](throw RuntimeException("secret-xyz"))
+    val e = intercept[IllegalArgumentException]:
       WebOps.httpGet(s"$baseUrl/whoami", Map.empty, Map("Authorization" -> bad))
+    assert(!e.getMessage.nn.contains("secret-xyz"), e.getMessage)
+    assertEquals(e.getCause, null)
+
+  test("secretHeaders: an invalid Classified value aborts the request without quoting it"):
+    given Network = NetworkImpl(Set("localhost"))
+    // The JDK's own message for an invalid header value quotes the value.
+    val bad = ClassifiedImpl.wrap("Bearer secret-xyz\nX-Injected: 1")
+    val e = intercept[IllegalArgumentException]:
+      WebOps.httpGet(s"$baseUrl/whoami", Map.empty, Map("Authorization" -> bad))
+    assert(!e.getMessage.nn.contains("secret-xyz"), e.getMessage)
+    assertEquals(e.getCause, null)
 
   test("httpRequest issues an arbitrary method and returns status + body"):
     given Network = NetworkImpl(Set("localhost"))

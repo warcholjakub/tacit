@@ -35,7 +35,10 @@ object WebOps:
   /** Applies plain and classified request headers. Classified values are
    *  unwrapped library-internally and written straight to the connection: they
    *  reach the allowlisted host but never flow back to agent code. A classified
-   *  value that wraps a failed computation aborts the request (fail closed). */
+   *  value that wraps a failed computation, or that is not a valid header
+   *  value, aborts the request (fail closed). Neither error carries the
+   *  original exception: the computation's could hold the secret, and the
+   *  JDK quotes an invalid value in its message. */
   private def applyHeaders(
     conn: HttpURLConnection,
     headers: Map[String, String],
@@ -44,8 +47,12 @@ object WebOps:
     headers.foreach((k, v) => conn.setRequestProperty(k, v))
     secretHeaders.foreach: (k, c) =>
       ClassifiedImpl.unwrap(c) match
-        case Success(v) => conn.setRequestProperty(k, v)
-        case Failure(e) => throw e
+        case Success(v) =>
+          try conn.setRequestProperty(k, v)
+          catch case _: Throwable =>
+            throw IllegalArgumentException(s"classified header '$k' is not a valid header value; request not sent")
+        case Failure(_) =>
+          throw IllegalArgumentException(s"classified header '$k' holds a failed computation; request not sent")
 
   /** Writes a request body and sets its content type. */
   private def writeBody(conn: HttpURLConnection, body: String, contentType: String): Unit =
