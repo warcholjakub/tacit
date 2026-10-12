@@ -175,6 +175,21 @@ class ClassifiedSuite extends munit.FunSuite:
     }
   }
 
+  test("a failed writeClassified() still creates the file and keeps existing content") {
+    // Otherwise `exists` after the write tells agent code whether a
+    // secret-dependent computation failed, one bit per write.
+    requestFileSystem("/virtual") {
+      val failed = ClassifiedImpl.wrap[String](throw RuntimeException("no"))
+      val fresh = access("/virtual/secret/fresh.txt")
+      fresh.writeClassified(failed)
+      assert(fresh.exists)
+      val kept = access("/virtual/secret/kept.txt")
+      kept.writeClassified(classify("old"))
+      kept.writeClassified(failed)
+      assertEquals(ClassifiedImpl.unwrap(kept.readClassified()).get, "old")
+    }
+  }
+
   test("readClassified() on classified file returns Classified[String]") {
     requestFileSystem("/virtual") {
       access("/virtual/secret/data.txt").writeClassified(classify("secret-content"))

@@ -204,12 +204,18 @@ class RealFileSystem private[library] (
       val p = revalidate()
       requireNotReadOnly(p, "writeClassified")
       requireClassifiedWritable(p, "writeClassified")
+      Files.createDirectories(p.getParent)
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>
-          Files.createDirectories(p.getParent)
           Files.write(p, value.getBytes(StandardCharsets.UTF_8))
           ()
-        case Failure(_) => // Classified wraps a failed computation; nothing to write
+        // A failed computation writes nothing, but the file is created all
+        // the same: whether it exists afterwards must not tell agent code
+        // whether the computation failed.
+        case Failure(_) =>
+          if !Files.exists(p) then
+            Files.write(p, Array.emptyByteArray)
+            ()
   end FileEntryImpl
 
   def access(path: String): FileEntry^{this} =

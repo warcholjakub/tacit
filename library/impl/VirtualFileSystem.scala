@@ -139,11 +139,14 @@ class VirtualFileSystem private[library] (
       requireWritable("writeClassified")
       requireNotReadOnly(resolved, "writeClassified")
       requireClassifiedWritable(resolved, "writeClassified")
+      ensureParentDirs(resolved)
       ClassifiedImpl.unwrap(content) match
         case Success(value) =>
-          ensureParentDirs(resolved)
           files(resolved) = value.getBytes(StandardCharsets.UTF_8)
-        case Failure(_) => // Classified wraps a failed computation; nothing to write
+        // As in RealFileSystem: created all the same, so existence does not
+        // tell whether the computation failed.
+        case Failure(_) =>
+          if !files.contains(resolved) then files(resolved) = Array.emptyByteArray
   end FileEntryImpl
 
   def access(path: String): FileEntry^{this} =

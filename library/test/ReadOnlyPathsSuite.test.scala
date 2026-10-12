@@ -39,6 +39,19 @@ class ReadOnlyPathsSuite extends munit.FunSuite:
   private def denied(op: => Unit): String =
     intercept[SecurityException](op).getMessage
 
+  test("a failed writeClassified creates the file on disk too, keeping existing content") {
+    withInterface(Nil, classified = List(".env.*")) { i =>
+      i.requestFileSystem(tmpDir.toString) {
+        val failed = ClassifiedImpl.wrap[String](throw RuntimeException("no"))
+        i.access(tmpDir.resolve("probe/.env.1").toString).writeClassified(failed)
+        i.access(tmpDir.resolve(".env.kept").toString).writeClassified(i.classify("old"))
+        i.access(tmpDir.resolve(".env.kept").toString).writeClassified(failed)
+      }
+    }
+    assertEquals(Files.readString(tmpDir.resolve("probe/.env.1")), "")
+    assertEquals(Files.readString(tmpDir.resolve(".env.kept")), "old")
+  }
+
   test("every change under a read-only directory is refused, reads are not") {
     val plugins = tmpDir.resolve("plugins")
     Files.createDirectories(plugins.resolve("sub"))
