@@ -17,6 +17,11 @@ object WebOps:
    *  (parsing twice is a foot-gun: the two parses could disagree). */
   private def validatedUri(url: String)(using net: Network): URI =
     val uri = URI(url)
+    // Only HTTP(S): other schemes with an allowlisted host (file://, ftp://)
+    // would reach a different protocol handler than the one checked here.
+    val scheme = Option(uri.getScheme).map(_.toLowerCase(java.util.Locale.ROOT))
+    if !scheme.exists(s => s == "http" || s == "https") then
+      throw SecurityException(s"Invalid URL (only http and https are allowed): $url")
     val host = uri.getHost
     if host == null then throw SecurityException(s"Invalid URL (no host): $url")
     net.validateHost(host)

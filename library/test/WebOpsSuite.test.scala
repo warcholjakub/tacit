@@ -125,8 +125,14 @@ class WebOpsSuite extends munit.FunSuite:
   test("httpGet rejects URL with no host"):
     given Network = NetworkImpl(Set("localhost"))
     val ex = intercept[SecurityException]:
-      get("file:///etc/passwd")
+      get("http:///etc/passwd")
     assert(ex.getMessage.nn.contains("no host"))
+
+  test("httpGet rejects schemes other than http and https, even with an allowed host"):
+    given Network = NetworkImpl(Set("localhost"))
+    for url <- List("file://localhost/etc/hosts", "ftp://localhost/x", "jar:http://localhost/x!/y") do
+      val ex = intercept[SecurityException](get(url))
+      assert(ex.getMessage.nn.contains("only http and https"), s"$url: ${ex.getMessage}")
 
   test("httpPost returns error body on 404"):
     given Network = NetworkImpl(Set("localhost"))
