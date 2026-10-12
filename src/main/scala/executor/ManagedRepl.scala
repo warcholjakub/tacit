@@ -104,6 +104,17 @@ object ManagedRepl:
       "-Yexplicit-nulls",
       "-Ycheck-all-patmat",
       "-Wsafe-init",
+      // Escalate unchecked type-test warnings to errors. Safe mode blocks an
+      // explicit (and compiler-synthesized) `asInstanceOf`, but a type pattern
+      // against an abstract type parameter — `def cast[A, B](a: A): B = a match
+      // { case b: B => b }` — erases to a plain cast with only an *unchecked*
+      // warning (E092), no `asInstanceOf`. That launders an impure,
+      // capability-capturing closure into a pure function type, which
+      // `Classified.map` then accepts, defeating the information-flow guarantee
+      // (a classified secret can be written to a file or sent over the network).
+      // Making the warning fatal closes that hole; legitimate matches on
+      // concrete/sealed types never trigger it.
+      "-Wconf:cat=unchecked:e",
       "-language:experimental.captureChecking",
       "-language:experimental.modularity",
       // No interrupt instrumentation. With the default (`true`) the REPL
