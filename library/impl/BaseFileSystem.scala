@@ -122,7 +122,27 @@ abstract class BaseFileSystem extends FileSystem:
         val matchers = absoluteMatchers.computeIfAbsent(key, g => globOrDescendantMatchers(g)).nn
         matchers.exists(_.matches(folded(p)))
       case CompiledPattern.Relative(matchers) =>
-        matchers.exists(_.matches(folded(normalizedRoot.relativize(p))))
+        // Match the pattern against the path relativized at the request root
+        // AND at every ancestor of that root. Anchoring only at `normalizedRoot`
+        // let an agent evade a relative pattern by requesting a filesystem root
+        // *inside* it: with a `secrets/apikey` pattern, rooting at `.../secrets`
+        // relativizes the file to just `apikey`, which no longer matches, so its
+        // classified content reads back in plaintext (see SECURITY.md). Walking
+        // up the ancestors restores the stripped leading components: requesting a
+        // deeper root only adds anchors, so the pattern still matches at the
+        // directory where it is anchored and re-rooting can no longer hide it.
+        // The request root is itself the first anchor, so every path that matched
+        // before still matches; extra matches at shallower anchors only ever
+        // widen protection (fail-closed).
+        val fp = folded(p)
+        var anchor: Path | Null = folded(normalizedRoot)
+        var found = false
+        while anchor != null && !found do
+          val a = anchor.nn
+          if fp.startsWith(a) then
+            if matchers.exists(_.matches(a.relativize(fp))) then found = true
+          anchor = a.getParent
+        found
 
   /** Precompiled matchers accepting a `glob` exactly or any descendant of a
     * match. For globs starting with `**​/`, leading-`**​/` stripped variants are
