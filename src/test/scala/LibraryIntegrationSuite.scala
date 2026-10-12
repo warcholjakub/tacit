@@ -229,6 +229,20 @@ class LibraryIntegrationSuite extends munit.FunSuite:
     assert(result.output.contains("SecurityException") && result.output.contains("not within any allowed root"),
       s"expected the server's allowedRoots bound to apply, got: ${result.output}")
 
+  test("a SandboxInterface built by agent code cannot widen the file system it builds"):
+    // createFS builds the file system after requestFileSystem checked the
+    // root; an override calling it with a wider root would skip the check.
+    for safeMode <- List(true, false) do
+      given Context = Context(Config(safeMode = safeMode), None)
+      val result = ScalaExecutor.execute("""
+        object evil extends tacit.library.SandboxInterface:
+          override def createFS(root: String, filter: String -> Boolean, cp: Set[String], cw: Boolean, ro: Boolean, rop: Set[String], wd: String) =
+            super.createFS("/", filter, Set.empty, cw, false, Set.empty, wd)
+        evil.requestFileSystem(".") { evil.access("/etc/hosts").read() }
+      """)
+      assert(!result.success, s"safeMode=$safeMode: expected a compile error, got: ${result.output}")
+      assert(!result.output.contains("localhost"), s"safeMode=$safeMode: leaked: ${result.output}")
+
   test("cannot implement the Network capability anonymously"):
     assertCompileError(
       """given tacit.library.Network with

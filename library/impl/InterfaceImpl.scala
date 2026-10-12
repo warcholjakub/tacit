@@ -78,8 +78,13 @@ abstract class InterfaceImpl private[library] (
    *  in the file system, not here).
    *
    *  `root` arrives canonical: absolute, normalized and with symlinks
-   *  resolved, exactly as it was checked against the bounds. */
-  protected def createFS(
+   *  resolved, exactly as it was checked against the bounds.
+   *
+   *  `private[library]`, not `protected`: agent code can extend
+   *  [[SandboxInterface]], and an override there could call it with a wider
+   *  root and no classified or read-only patterns after `requestFileSystem`
+   *  checked the requested one. */
+  private[library] def createFS(
     root: String,
     filter: String -> Boolean,
     classifiedPatterns: Set[String],
